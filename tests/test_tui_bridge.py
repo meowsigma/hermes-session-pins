@@ -27,7 +27,12 @@ class NativeInventoryTests(unittest.TestCase):
         self.db.append_message(sid, "user", "synthetic test message, not UI metadata")
 
     def test_inventory_uses_all_visible_rows_and_full_titles_without_mutation(self):
-        long = "a" * 190 + " distinguishing needle"
+        # Exercise the maximum legal native title; its distinguishing search
+        # term still lies beyond the old 90-character presentation cap.
+        suffix = "needle"
+        long = "a" * (SessionDB.MAX_TITLE_LENGTH - len(suffix)) + suffix
+        self.assertEqual(SessionDB.MAX_TITLE_LENGTH, len(long))
+        self.assertGreaterEqual(long.index(suffix), 90)
         self.chat("ordinary", long)
         self.chat("pinned", "Pinned project")
         self.db.set_session_pinned("pinned", True)
