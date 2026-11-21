@@ -30,7 +30,7 @@ catalog, reopen that client. No background-service restart is required by this p
 Type titles with spaces as-is, for example `/pin My Project` (no quotes). A
 full ID wins if it also happens to be another chat's title. Otherwise an exact,
 case-sensitive stored title wins. If neither matches, an explicitly typed ID
-prefix is accepted only if Hermes finds one match and the prefix's case matches.
+prefix is accepted only when exactly one stored ID starts with it, matching case.
 Duplicate titles, ambiguous prefixes, and unknown selectors do not change pins.
 Use the full ID to disambiguate. Title matching doesn't use previews, partial
 titles, or newer `#2`-style names as fallbacks. The search covers the active
@@ -98,7 +98,8 @@ printed for it; the stored ID is not changed. Direct launching uses an exact
 argument vector, without a shell, and preserves the selected home/profile.
 Homes that Hermes would reinterpret on child startup are refused rather than
 redirected. A current or picker-selected session ID that disappeared never falls
-back to a title or prefix match.
+back to a title or prefix match. Picker pin changes stay in the profile that
+supplied the selection.
 
 ## Remove
 

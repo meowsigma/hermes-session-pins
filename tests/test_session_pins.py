@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import closing, redirect_stderr, redirect_stdout
+from contextlib import closing, contextmanager, redirect_stderr, redirect_stdout
 import io
 import os
 from pathlib import Path
@@ -13,6 +13,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 from hermes_state import SessionDB
+from prompt_toolkit import Application
+from prompt_toolkit.application import create_app_session
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
@@ -35,6 +37,16 @@ class PinsTests(unittest.TestCase):
         self.db.set_session_title(sid, title)
         self.db.append_message(sid, "user", "synthetic test message")
         return sid
+
+    def other_profile_with_pin(self, sid):
+        other = self.home / "other-profile"
+        other.mkdir()
+        with SessionDB(db_path=other / "state.db") as db:
+            db.create_session(sid, source="cli")
+            db.set_session_title(sid, "Other profile chat")
+            db.append_message(sid, "user", "synthetic other profile message")
+            db.set_session_pinned(sid, True)
+        return other
 
     def test_pin_current_chat_is_idempotent_and_durable(self):
         sid = self.chat()
@@ -115,6 +127,40 @@ class PinsTests(unittest.TestCase):
             self.assertFalse(reopened.get_session(first)["pinned"])
             self.assertTrue(reopened.get_session(second)["pinned"])
 
+    def assert_title_race_refused(self, *, delete, message):
+        target = self.chat("target", "Selected title")
+        other = self.chat("other", "Replacement chat")
+        original_database = pins.database
+
+        @contextmanager
+        def database(**kwargs):
+            with original_database(**kwargs) as db:
+                yield db
+            # The read-only selection is finished; the writer has not opened yet.
+            if not kwargs.get("writable"):
+                if delete:
+                    self.db.delete_session(target)
+                else:
+                    self.db.set_session_title(target, "Renamed target")
+                self.db.set_session_title(other, "Selected title")
+
+        with patch.object(pins, "database", database):
+            result = pins.command_pin("Selected title", platform="tui")
+        self.assertIn(message, result)
+        self.assertEqual("Selected title", self.db.get_session_title(other))
+        self.assertFalse(self.db.get_session(other)["pinned"])
+        if delete:
+            self.assertIsNone(self.db.get_session(target))
+        else:
+            self.assertEqual("Renamed target", self.db.get_session_title(target))
+            self.assertFalse(self.db.get_session(target)["pinned"])
+
+    def test_title_target_renamed_before_writer_recheck_is_refused(self):
+        self.assert_title_race_refused(delete=False, message="title changed during lookup")
+
+    def test_title_target_deleted_before_writer_recheck_is_refused(self):
+        self.assert_title_race_refused(delete=True, message="no longer exists")
+
     def test_pin_errors_do_not_echo_terminal_controls(self):
         with patch.object(pins, "set_pin", side_effect=sqlite3.OperationalError("disk error\x1b[31m\r")):
             result = pins.command_pin("Example title", platform="tui")
@@ -153,11 +199,20 @@ class PinsTests(unittest.TestCase):
 
     def test_prefix_ambiguity_refuses_without_modifying_sessions(self):
         self.chat("ambiguous-one", "One")
-        self.chat("ambiguous-two", "Two")
+        hidden = self.chat("ambiguous-two", "Two")
+        self.db.set_session_hidden(hidden, True)
         with self.assertRaisesRegex(pins.PinsError, "ambiguous"):
             pins.set_pin("ambiguous", True)
         self.assertEqual([], pins.session_rows())
+        self.assertFalse(self.db.get_session(hidden)["pinned"])
         self.assertEqual("ambiguous-one", pins.set_pin("ambiguous-o", True)["id"])
+
+    def test_prefix_uniqueness_counts_only_literal_case_sensitive_matches(self):
+        target = self.chat("Abc-one", "Uppercase match")
+        other = self.chat("abc-two", "Lowercase match")
+        self.assertIn("Pinned: Uppercase match", pins.command_pin("Abc", platform="tui"))
+        self.assertTrue(self.db.get_session(target)["pinned"])
+        self.assertFalse(self.db.get_session(other)["pinned"])
 
     def test_empty_session_id_refuses(self):
         response = pins.command_pin("", platform="tui")
@@ -257,6 +312,24 @@ class PinsTests(unittest.TestCase):
         self.assertEqual(1, self.db.get_session(sid)["pinned"])
         self.assertIn("Unpinned", pins.command_pins(Context([sid, "unpin"]), "manage", platform="tui"))
         self.assertEqual(0, self.db.get_session(sid)["pinned"])
+
+    def test_slash_manage_unpins_in_the_profile_that_supplied_the_choice(self):
+        sid = self.chat("shared-id", "Source profile chat")
+        self.db.set_session_pinned(sid, True)
+        other = self.other_profile_with_pin(sid)
+
+        def choose(question, choices):
+            if choices[0]["value"] == "resume":
+                os.environ["HERMES_HOME"] = str(other)
+                return "unpin"
+            self.assertEqual("★ Source profile chat", choices[0]["label"])
+            return choices[0]["value"]
+
+        result = pins.command_pins(Mock(ask_choice=choose), "manage", platform="tui")
+        with SessionDB(db_path=other / "state.db", read_only=True) as db:
+            actual = (bool(self.db.get_session(sid)["pinned"]), bool(db.get_session(sid)["pinned"]))
+        self.assertEqual((False, True), actual)
+        self.assertIn("Unpinned: Source profile chat", result)
 
     def test_slash_list_and_handoff_refuse_nonprintable_ids(self):
         safe = self.chat()
@@ -376,6 +449,40 @@ class PinsTests(unittest.TestCase):
             chosen = pins.picker(pins.session_rows(recent=True), input=input, output=DummyOutput())
         self.assertEqual(sid, chosen["id"])
         self.assertEqual(1, self.db.get_session(sid)["pinned"])
+
+    def test_cli_picker_keyboard_toggle_refreshes_and_hands_off_in_source_profile(self):
+        sid = self.chat("shared-id", "Source profile chat")
+        self.db.set_session_pinned(sid, True)
+        other = self.other_profile_with_pin(sid)
+        args = argparse.Namespace(action="pick", session_id=None, print_only=False)
+        original_run = Application.run
+        picked = []
+
+        def run(app):
+            def switch_profile_and_type():
+                os.environ["HERMES_HOME"] = str(other)
+                pipe.send_text("\x10\r")  # Ctrl-P then Enter on the refreshed list
+
+            row = original_run(app, pre_run=switch_profile_and_type)
+            picked.append((row["id"], row["title"], bool(row["pinned"])))
+            return row
+
+        with (create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()),
+              patch.object(Application, "run", run), patch.object(pins.sys, "stdin") as stdin,
+              patch.object(pins.sys, "stdout") as stdout,
+              patch.object(pins.shutil, "which", return_value="/usr/bin/hermes"),
+              patch.object(pins.subprocess, "call", return_value=0) as call):
+            stdin.isatty.return_value = stdout.isatty.return_value = True
+            self.assertEqual(0, pins.cli(args))
+            call.assert_called_once_with(
+                ["/usr/bin/hermes", "chat", "--resume", sid, "--profile", "default"],
+                env=dict(os.environ, HERMES_HOME=str(self.home)),
+            )
+
+        with SessionDB(db_path=other / "state.db", read_only=True) as db:
+            self.assertEqual(((sid, "Source profile chat", False), False, True),
+                             (*picked, bool(self.db.get_session(sid)["pinned"]),
+                              bool(db.get_session(sid)["pinned"])))
 
     def test_picker_renders_star_and_highlight_styles(self):
         self.chat("pinned", "Pinned chat")

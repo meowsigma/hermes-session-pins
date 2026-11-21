@@ -7,8 +7,11 @@
   chats. With no selector they still target the current session. `hermes pins
   pin` and `hermes pins unpin` accept the same selectors.
 - A full ID wins over an exact title, and an exact title wins over a unique
-  typed ID prefix. Duplicate titles, ambiguous prefixes and unknown targets
-  are refused without changing pins. Current and picker IDs stay exact-only.
+  literal, case-sensitive ID prefix. Duplicate titles, ambiguous prefixes and
+  unknown targets are refused without changing pins. Current and picker IDs
+  stay exact-only.
+- `/pins manage` and the standalone picker update pins in the profile that
+  supplied the selection.
 - Stored titles can resolve outside the recent list, including archived chats.
   Native lineage pinning and visibility rules are unchanged.
 

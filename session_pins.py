@@ -53,6 +53,16 @@ def database(*, writable: bool = False, home: Path | None = None):
         yield db
 
 
+def stored_rows(db: SessionDB) -> list[dict]:
+    # Selector uniqueness includes all stored rows, not the visible picker's
+    # page or projected lineages.
+    return db.list_sessions_rich(
+        limit=-1, include_children=True, project_compression_tips=False,
+        include_archived=True, include_hidden=True, include_subagents=True,
+        compact_rows=True,
+    )
+
+
 def resolve_selector(db: SessionDB, value: str) -> tuple[str, bool]:
     """Return the exact key and whether it was selected by title."""
     if db.get_session(value) is not None:
@@ -61,32 +71,25 @@ def resolve_selector(db: SessionDB, value: str) -> tuple[str, bool]:
     # Native resume prefers newer numbered titles. The exact-title API also
     # returns only one row, so use it as a hit probe, not a uniqueness check.
     if db.get_session_by_title(value) is not None:
-        # Legacy stores can contain duplicates. Check a single unpaged read
-        # of stored rows, not the visible picker's projected lineages.
-        matches = [row["id"] for row in db.list_sessions_rich(
-            limit=-1, include_children=True, project_compression_tips=False,
-            include_archived=True, include_hidden=True, include_subagents=True,
-            compact_rows=True,
-        ) if row.get("title") == value]
+        matches = [row["id"] for row in stored_rows(db) if row.get("title") == value]
         if len(matches) > 1:
             raise PinsError("That title is ambiguous in this profile. Use the full session ID.")
         if not matches:
             raise PinsError("That title changed during lookup. Retry or use the full session ID.")
         return matches[0], True
 
-    # Native prefix lookup refuses multiple candidates and escapes LIKE
-    # wildcards. Require a literal prefix as well (SQLite LIKE folds ASCII case).
-    sid = db.resolve_session_id(value)
-    if not sid or not sid.startswith(value):
+    # SQLite LIKE folds ASCII case. Decide uniqueness over literal matches.
+    matches = [row["id"] for row in stored_rows(db) if row["id"].startswith(value)]
+    if len(matches) != 1:
         raise PinsError("Session not found in this profile, or that ID prefix is ambiguous. "
                         "Use the exact title or full session ID.")
-    return sid, False
+    return matches[0], False
 
 
-def set_pin(value: str, pinned: bool, *, exact: bool = False) -> dict:
+def set_pin(value: str, pinned: bool, *, exact: bool = False, home: Path | None = None) -> dict:
     if not value:
         raise PinsError("No current session yet. Send a message first, or provide a title or full session ID.")
-    home = Path(get_hermes_home())
+    home = Path(get_hermes_home()) if home is None else home
     missing = "That session no longer exists in this profile. Refresh or use a full session ID."
     # Resolve before opening a writer, which could repair legacy duplicate
     # titles. A failed selector shouldn't change the store at all.
@@ -200,7 +203,8 @@ def command_pins(ctx, raw_args: str, *, platform: str = "") -> str:
         mode = raw_args.strip().lower()
         if mode not in {"", "list", "manage"}:
             return "Usage: /pins [list|manage]. Pin this chat with /pin; remove its pin with /unpin."
-        rows = session_rows()
+        home = Path(get_hermes_home()).absolute()
+        rows = session_rows(home=home)
         if not rows:
             return "No pinned chats in this list. Use /pin in a chat you want to keep."
         if mode == "list":
@@ -220,7 +224,7 @@ def command_pins(ctx, raw_args: str, *, platform: str = "") -> str:
                 {"value": "unpin", "label": "Unpin this chat"},
             ])
             if action == "unpin":
-                return f"Unpinned: {title(set_pin(row['id'], False, exact=True))}"
+                return f"Unpinned: {title(set_pin(row['id'], False, exact=True, home=home))}"
             if action != "resume":
                 return "No change."
         # Plugin handlers return text, not frontend session-switch directives.
@@ -230,7 +234,7 @@ def command_pins(ctx, raw_args: str, *, platform: str = "") -> str:
         return command_error(exc)
 
 
-def picker(rows: list[dict], *, input=None, output=None) -> dict | None:
+def picker(rows: list[dict], *, home: Path | None = None, input=None, output=None) -> dict | None:
     """Native-style history list using Hermes's existing prompt_toolkit dependency."""
     from time import time
 
@@ -244,6 +248,7 @@ def picker(rows: list[dict], *, input=None, output=None) -> dict | None:
     else:
         from picker_style import fit, picker_style, session_age, session_row
 
+    home = Path(get_hermes_home()).absolute() if home is None else home
     index = 0
     query = ""
     error = ""
@@ -330,8 +335,8 @@ def picker(rows: list[dict], *, input=None, output=None) -> dict | None:
         if not selected:
             return
         try:
-            set_pin(selected[index]["id"], not bool(selected[index].get("pinned")), exact=True)
-            rows = session_rows(recent=True)
+            set_pin(selected[index]["id"], not bool(selected[index].get("pinned")), exact=True, home=home)
+            rows = session_rows(recent=True, home=home)
             index = 0
             error = ""
         except (PinsError, OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
@@ -390,7 +395,7 @@ def cli(args):
             return 0
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             raise PinsError("The picker needs a terminal. Use hermes pins list for plain output.")
-        selected = picker(rows)
+        selected = picker(rows, home=home)
         if selected is None:
             return 0
         if args.print_only:
