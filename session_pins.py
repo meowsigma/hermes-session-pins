@@ -59,11 +59,14 @@ def resolve(db, value: str) -> dict:
     return row
 
 
-def set_pin(value: str, pinned: bool) -> dict:
+def set_pin(value: str, pinned: bool, *, exact: bool = False) -> dict:
     if not value:
         raise PinsError("No current session yet. Send a message first, or provide a session ID.")
     with database(writable=True) as db:
-        row = resolve(db, value)
+        # Known UI/current-session IDs must never fall back to a longer prefix.
+        row = db.get_session(value) if exact else resolve(db, value)
+        if row is None:
+            raise PinsError("That session no longer exists.")
         if not db.set_session_pinned(row["id"], pinned):
             raise PinsError("Hermes could not update that session's pin.")
         updated = db.get_session(row["id"])
@@ -95,6 +98,17 @@ def resume_argv(sid: str, home: Path) -> list[str]:
     return ["chat", *resume, *profile]
 
 
+def resume_home(home: Path) -> str:
+    """Refuse homes that a new Hermes process could interpret differently."""
+    path = str(home)
+    # Be conservative about variable syntax, even if currently undefined: startup
+    # may supply additional environment values. Never rewrite the selected home.
+    if ("$" in path or path != path.strip()
+            or os.path.expanduser(os.path.expandvars(path)) != path):
+        raise PinsError("Resume unavailable: this Hermes home would be reinterpreted at startup.")
+    return path
+
+
 def resume_command(sid: str, *, home: Path | None = None) -> str:
     # Shell quoting is not terminal escaping. Never rewrite the ID to make it fit.
     id_error = "Resume command unavailable: this session ID cannot be copied safely."
@@ -108,9 +122,8 @@ def resume_command(sid: str, *, home: Path | None = None) -> str:
 
     if os.name != "posix":
         raise PinsError("Printed shell resume commands require a POSIX shell. Launch it from the picker instead.")
-    path = str(home)
-    # Hermes expands variables and trims HERMES_HOME again on startup.
-    if not path.isprintable() or "$" in path or path != path.strip():
+    path = resume_home(home)
+    if not path.isprintable():
         raise PinsError("Resume command unavailable: this Hermes home cannot be copied safely.")
     return shlex.join(["env", f"HERMES_HOME={path}", "hermes", *resume_argv(sid, home)])
 
@@ -132,8 +145,8 @@ def require_local(platform: str) -> None:
 def command_pin(raw_args: str, *, session_id: str = "", platform: str = "", pinned: bool = True) -> str:
     try:
         require_local(platform)
-        value = raw_args.strip() or session_id
-        row = set_pin(value, pinned)
+        selector = raw_args.strip()
+        row = set_pin(selector or session_id, pinned, exact=not bool(selector))
         if pinned:
             hint = ("This chat is still marked hidden; Hermes may omit it from pin lists."
                     if row.get("hidden") else "Browse visible pins with /pins or hermes pins.")
@@ -169,7 +182,7 @@ def command_pins(ctx, raw_args: str, *, platform: str = "") -> str:
                 {"value": "unpin", "label": "Unpin this chat"},
             ])
             if action == "unpin":
-                return f"Unpinned: {title(set_pin(row['id'], False))}"
+                return f"Unpinned: {title(set_pin(row['id'], False, exact=True))}"
             if action != "resume":
                 return "No change."
         # Plugin handlers return text, not frontend session-switch directives.
@@ -279,7 +292,7 @@ def picker(rows: list[dict], *, input=None, output=None) -> dict | None:
         if not selected:
             return
         try:
-            set_pin(selected[index]["id"], not bool(selected[index].get("pinned")))
+            set_pin(selected[index]["id"], not bool(selected[index].get("pinned")), exact=True)
             rows = session_rows(recent=True)
             index = 0
             error = ""
@@ -344,12 +357,13 @@ def cli(args):
         if args.print_only:
             print(resume_command(selected["id"], home=home))
             return 0
+        path = resume_home(home)
         executable = shutil.which("hermes")
         if not executable:
             raise PinsError("Cannot find the Hermes executable in PATH.")
         # No shell, no option-shaped ID injection, and no sticky-profile redirect.
         return subprocess.call([executable, *resume_argv(selected["id"], home)],
-                               env=dict(os.environ, HERMES_HOME=str(home)))
+                               env=dict(os.environ, HERMES_HOME=path))
     except (PinsError, OSError, RuntimeError, ValueError, sqlite3.Error, EOFError) as exc:
         print(f"Session Pins: {exc}", file=sys.stderr)
         return 1

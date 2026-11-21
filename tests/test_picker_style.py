@@ -60,6 +60,19 @@ def profile(skin="default", **env):
 
 
 class PickerStyleTests(unittest.TestCase):
+    def test_missing_skin_uses_light_fallback_in_the_actual_frame(self):
+        with profile("missing-skin", HERMES_TUI_THEME="light"):
+            _, frames = render_picker([{"id": "exact-id", "title": "Light fallback", "pinned": True}])
+        lines, style = frames[0]
+        self.assertIn("★ Light fallback", line_text(lines[2]))
+        self.assertEqual("956e00", style.get_attrs_for_style_str(lines[0][0].style).color)
+        self.assertTrue(all(style.get_attrs_for_style_str(cell.style).bgcolor == "e0d1bf" for cell in lines[2]))
+
+    def test_combining_marks_survive_cell_truncation(self):
+        from picker_style import fit
+        self.assertEqual("e\u0301…", fit("e\u0301clair", 2))
+        self.assertEqual("e\u0301", fit("e\u0301", 1))
+
     def test_numbered_metadata_borderless_layout_and_full_row_chip(self):
         rows = [
             {"id": "20260606_123456_abcd", "title": "Pinned project", "pinned": True,

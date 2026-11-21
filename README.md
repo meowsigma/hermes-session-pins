@@ -83,6 +83,9 @@ session contents are sent anywhere. Display text removes or escapes control
 characters. If a session ID cannot be copied safely, no resume command is
 printed for it; the stored ID is not changed. Direct launching uses an exact
 argument vector, without a shell, and preserves the selected home/profile.
+Homes that Hermes would reinterpret on child startup are refused rather than
+redirected. Prefix matching applies only to explicitly typed pin/unpin selectors;
+a selected or current session that disappeared is never replaced by a prefix match.
 
 ## Remove
 

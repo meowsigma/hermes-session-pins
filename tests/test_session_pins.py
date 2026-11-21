@@ -219,6 +219,60 @@ class PinsTests(unittest.TestCase):
             chosen = pins.picker(rows, input=input, output=DummyOutput())
         self.assertIsNone(chosen)
 
+    def test_stale_current_id_never_mutates_a_longer_surviving_id(self):
+        longer = self.chat("gone-longer", "Surviving chat")
+        self.db.set_session_pinned(longer, True)
+        result = pins.command_pin("", session_id="gone", platform="tui", pinned=False)
+        self.assertIn("no longer exists", result)
+        self.assertTrue(self.db.get_session(longer)["pinned"])
+
+    def test_stale_slash_manage_selection_never_unpins_a_longer_id(self):
+        short = self.chat("gone", "Removed chat")
+        longer = self.chat("gone-longer", "Surviving chat")
+        for sid in (short, longer):
+            self.db.set_session_pinned(sid, True)
+        def choose(question, choices):
+            if choices[0]["value"] == "resume":
+                return "unpin"
+            self.db.delete_session(short)
+            return short
+        result = pins.command_pins(Mock(ask_choice=choose), "manage", platform="tui")
+        self.assertIn("no longer exists", result)
+        self.assertTrue(self.db.get_session(longer)["pinned"])
+
+    def test_stale_keyboard_selection_never_unpins_a_longer_id(self):
+        short = self.chat("gone", "Removed chat")
+        longer = self.chat("gone-longer", "Surviving chat")
+        for sid in (short, longer):
+            self.db.set_session_pinned(sid, True)
+        snapshot = self.db.get_session(short)
+        self.db.delete_session(short)
+        with create_pipe_input() as input:
+            input.send_text("\x10\x04")  # Ctrl-P then Ctrl-D
+            chosen = pins.picker([snapshot], input=input, output=DummyOutput())
+        self.assertIsNone(chosen)
+        self.assertTrue(self.db.get_session(longer)["pinned"])
+
+    def test_direct_launch_refuses_a_reinterpreted_home_before_subprocess(self):
+        unsafe = self.home / "$USER"
+        unsafe.mkdir()
+        with SessionDB(db_path=unsafe / "state.db") as db:
+            db.create_session("exact-chat", source="cli")
+            db.append_message("exact-chat", "user", "Synthetic home test")
+        args = argparse.Namespace(action="pick", session_id=None, print_only=False)
+        out, err = io.StringIO(), io.StringIO()
+        with (redirect_stdout(out), redirect_stderr(err),
+              patch.object(out, "isatty", return_value=True),
+              patch.object(pins.sys, "stdin") as stdin,
+              patch.object(pins, "get_hermes_home", return_value=unsafe),
+              patch.object(pins, "picker", return_value={"id": "exact-chat"}),
+              patch.object(pins.subprocess, "call") as call):
+            stdin.isatty.return_value = True
+            self.assertEqual(1, pins.cli(args))
+            call.assert_not_called()
+        self.assertIn("reinterpreted at startup", err.getvalue())
+        self.assertEqual("", out.getvalue())
+
     def test_picker_keyboard_pin_toggle_persists(self):
         sid = self.chat()
         with create_pipe_input() as input:

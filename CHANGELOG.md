@@ -12,6 +12,8 @@
 - Preserve the selected home/profile in printed commands and direct launches;
   keep option-shaped IDs from being interpreted as command-line options.
 - Qualify pin confirmations and lists to respect native hidden-session rules.
+- Refuse child launches when Hermes would reinterpret the selected home, and
+  prevent stale picker/current-session IDs from mutating a surviving prefix match.
 
 The built-in `/resume` picker remains unchanged. `/pins` still uses Hermes's
 host-owned choice prompt and returns a resume command; `hermes pins` is the
