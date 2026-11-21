@@ -176,12 +176,18 @@ def command_pins(ctx, raw_args: str, *, platform: str = "") -> str:
 
 
 def picker(rows: list[dict], *, input=None, output=None) -> dict | None:
-    """Keyboard-only picker; using Hermes's existing prompt_toolkit dependency."""
+    """Native-style history list using Hermes's existing prompt_toolkit dependency."""
+    from time import time
+
     from prompt_toolkit import Application
+    from prompt_toolkit.application import get_app
     from prompt_toolkit.key_binding import KeyBindings
-    from prompt_toolkit.layout import HSplit, Layout
-    from prompt_toolkit.styles import Style
-    from prompt_toolkit.widgets import Frame, Label
+    from prompt_toolkit.layout import FormattedTextControl, Layout, Window
+
+    if __package__:
+        from .picker_style import fit, picker_style, session_age, session_row
+    else:
+        from picker_style import fit, picker_style, session_age, session_row
 
     index = 0
     query = ""
@@ -189,18 +195,55 @@ def picker(rows: list[dict], *, input=None, output=None) -> dict | None:
     keys = KeyBindings()
 
     def visible():
-        return [row for row in rows if query.casefold() in (title(row) + " " + row["id"]).casefold()]
+        needle = query.casefold()
+        return [row for row in rows if needle in (title(row) + " " + row["id"]).casefold()] if needle else rows
 
     def content():
-        selected = visible()
-        start = max(0, index - 6)
-        fragments = []
-        for position, row in enumerate(selected[start:start + 12], start):
-            mark = STAR if row.get("pinned") else " "
-            style = "class:selected" if position == index else "class:pinned" if row.get("pinned") else ""
-            fragments.append((style, f"{'›' if position == index else ' '} {mark} {title(row)}  [{clean_label(row['id'], 36)}]\n"))
-        if not selected:
-            fragments.append(("class:muted", "  No matching chats\n"))
+        size = get_app().output.get_size()
+        width = min(size.columns, 128)
+        matches = visible()
+        total = len(matches)
+        pinned_count = sum(bool(row.get("pinned")) for row in matches)
+        count = f"{total} of {len(rows)}" if query else str(total)
+        fragments = [("class:heading", fit("Sessions", width) + "\n"),
+                     ("class:muted", fit(f"{count} resumable · {pinned_count} pinned", width) + "\n")]
+        if error:
+            fragments.append(("class:error", fit(error, width) + "\n"))
+        if query:
+            fragments.append(("class:muted", fit(f"Search: {query}", width) + "\n"))
+
+        space = size.rows - 3 - bool(query) - bool(error)  # header, count, footer
+        # Reserve room for scroll indicators, but keep the selection visible.
+        room = min(12, max(1, space))
+        show_scroll = total > room and space >= 3
+        if show_scroll:
+            room = min(12, space - 2)
+        start = max(0, min(index - room // 2, total - room))
+        stop = min(total, start + room)
+        if show_scroll and start:
+            fragments.append(("class:muted", fit(f"↑ {start} more above", width) + "\n"))
+        now = time()
+        for position in range(start, stop):
+            row = matches[position]
+            label = title(row)
+            fragments.extend(session_row(
+                width=width, number=position + 1, selected=position == index,
+                sid=clean_label(row["id"]), age=session_age(row.get("started_at"), now),
+                count=row.get("message_count"), title=label,
+                pin=STAR if row.get("pinned") else "",
+            ))
+            fragments.append(("", "\n"))
+        if show_scroll and stop < total:
+            fragments.append(("class:muted", fit(f"↓ {total - stop} more below", width) + "\n"))
+        if not matches:
+            fragments.append(("class:muted", fit("No matching sessions" if query else "No sessions", width) + "\n"))
+
+        if width >= 70:
+            for hotkey, hint in (("↑↓", " move · "), ("Enter", " resume · "),
+                                 ("Ctrl-P", " pin/unpin · "), ("Esc", " close · type to filter")):
+                fragments.extend((("class:hotkey", hotkey), ("class:muted", hint)))
+        else:
+            fragments.append(("class:muted", fit("↑↓ Enter Ctrl-P Esc · type to filter", width)))
         return fragments
 
     @keys.add("up")
@@ -250,16 +293,11 @@ def picker(rows: list[dict], *, input=None, output=None) -> dict | None:
         if event.data.isprintable():
             query, index = query + event.data, 0
 
-    body = HSplit([
-        Label("★ Pinned chats first · recent chats below"),
-        Label(lambda: f"Search: {query}"),
-        Label(content),
-        Label(lambda: error or "↑/↓ select · Enter resume · Ctrl-P pin/unpin · Esc close"),
-    ])
+    body = Window(FormattedTextControl(content, focusable=True, show_cursor=False),
+                  wrap_lines=False, dont_extend_height=True, always_hide_cursor=True)
     return Application(
-        layout=Layout(Frame(body, title="Hermes Session Pins")), key_bindings=keys,
-        style=Style.from_dict({"pinned": "ansiyellow bold", "selected": "reverse bold", "muted": "ansibrightblack"}),
-        full_screen=True, input=input, output=output,
+        layout=Layout(body), key_bindings=keys, style=picker_style(),
+        erase_when_done=True, input=input, output=output,
     ).run()
 
 
