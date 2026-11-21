@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import closing, redirect_stderr, redirect_stdout
 import io
 import os
 from pathlib import Path
 import shlex
+import sqlite3
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -42,6 +43,83 @@ class PinsTests(unittest.TestCase):
         with SessionDB(db_path=self.home / "state.db", read_only=True) as reopened:
             self.assertEqual(1, reopened.get_session(sid)["pinned"])
         self.assertEqual([sid], [r["id"] for r in pins.session_rows()])
+
+    def test_registered_commands_target_another_chat_by_name_or_full_id(self):
+        caller = self.chat("caller-a", "Caller A")
+        target = self.chat("target-b", "example-session")
+        before = self.db.get_session(caller)
+        ctx = Mock()
+        pins.register(ctx)
+        commands = dict(call.args[:2] for call in ctx.register_command.call_args_list)
+        for selector in ("example-session", target):
+            with self.subTest(selector=selector):
+                for command, expected in (("pin", 1), ("unpin", 0)):
+                    result = commands[command](selector, session_id=caller, platform="tui")
+                    self.assertIn("Pinned: example-session" if expected else "Unpinned: example-session", result)
+                    with SessionDB(db_path=self.home / "state.db", read_only=True) as reopened:
+                        self.assertEqual(expected, reopened.get_session(target)["pinned"])
+                        self.assertEqual(before, reopened.get_session(caller))
+
+    def test_exact_title_with_spaces_beats_a_numbered_continuation_and_id_prefix(self):
+        caller = self.chat("caller", "Caller")
+        target = self.chat("my-project", "My Project")
+        numbered = self.chat("My Project-next", "My Project #2")
+        self.assertIn("★ Pinned", pins.command_pin("My Project", session_id=caller, platform="cli"))
+        self.assertTrue(self.db.get_session(target)["pinned"])
+        self.assertFalse(self.db.get_session(numbered)["pinned"])
+        self.assertFalse(self.db.get_session(caller)["pinned"])
+
+    def test_full_id_beats_a_colliding_title_and_longer_id(self):
+        target = self.chat("real-id", "Exact ID target")
+        titled = self.chat("other-id", target)
+        longer = self.chat("real-id-more", "Prefix match")
+        self.assertIn("Pinned: Exact ID target", pins.command_pin(target, platform="tui"))
+        self.assertEqual([target], [row["id"] for row in pins.session_rows()])
+        self.assertFalse(self.db.get_session(titled)["pinned"])
+        self.assertFalse(self.db.get_session(longer)["pinned"])
+
+    def test_unknown_and_ambiguous_selectors_do_not_modify_pins(self):
+        caller = self.chat("caller", "Caller")
+        first = self.chat("common-a", "Text with preview")
+        second = self.chat("common-b", "Exact Name #2")
+        self.db.set_session_pinned(first, True)
+        before = {sid: self.db.get_session(sid) for sid in (caller, first, second)}
+        selectors = ("common", "common%", "COMMON-A", "Exact Name", "exact name #2",
+                     "synthetic test message", "missing\x1b[31m")
+        for selector in selectors:
+            for pinned in (True, False):
+                with self.subTest(selector=selector, pinned=pinned):
+                    result = pins.command_pin(selector, session_id=caller, platform="tui", pinned=pinned)
+                    self.assertTrue(result.startswith("Session Pins:"), result)
+                    self.assertIn("full session ID", result)
+                    self.assertNotIn("\x1b", result)
+        self.assertEqual(before, {sid: self.db.get_session(sid) for sid in before})
+
+    def test_legacy_duplicate_title_refused_without_writer_open_or_title_repair(self):
+        first = self.chat("duplicate-old", "Duplicate name")
+        second = self.chat("duplicate-new", "Other name")
+        self.db.set_session_hidden(first, True)
+        self.db.set_session_archived(first, True, notify=False)
+        self.db.set_session_pinned(second, True)
+        # Simulate a pre-index store without using private SessionDB methods.
+        with closing(sqlite3.connect(self.home / "state.db")) as conn, conn:
+            conn.execute("DROP INDEX idx_sessions_title_unique")
+            conn.execute("UPDATE sessions SET title = ? WHERE id = ?", ("Duplicate name", second))
+        for pinned in (True, False):
+            result = pins.command_pin("Duplicate name", platform="tui", pinned=pinned)
+            self.assertIn("ambiguous", result)
+            self.assertIn("full session ID", result)
+        with SessionDB(db_path=self.home / "state.db", read_only=True) as reopened:
+            self.assertEqual("Duplicate name", reopened.get_session_title(first))
+            self.assertEqual("Duplicate name", reopened.get_session_title(second))
+            self.assertFalse(reopened.get_session(first)["pinned"])
+            self.assertTrue(reopened.get_session(second)["pinned"])
+
+    def test_pin_errors_do_not_echo_terminal_controls(self):
+        with patch.object(pins, "set_pin", side_effect=sqlite3.OperationalError("disk error\x1b[31m\r")):
+            result = pins.command_pin("Example title", platform="tui")
+        self.assertIn("disk error", result)
+        self.assertTrue(result.isprintable())
 
     def test_unpin_and_no_content_or_timestamp_changes(self):
         sid = self.chat()
@@ -89,30 +167,42 @@ class PinsTests(unittest.TestCase):
     def test_messaging_cannot_list_or_mutate_pins(self):
         sid = self.chat()
         for platform in ("telegram", "discord", "", "unknown"):
-            self.assertIn("not messaging chats", pins.command_pin(sid, platform=platform))
-            self.assertIn("not messaging chats", pins.command_pins(None, "list", platform=platform))
+            with patch.object(pins, "database", side_effect=AssertionError("storage must not be opened")):
+                self.assertIn("not messaging chats", pins.command_pin(sid, platform=platform))
+                self.assertIn("not messaging chats", pins.command_pin("Main project", platform=platform))
+                self.assertIn("not messaging chats", pins.command_pin("Main project", platform=platform, pinned=False))
+                self.assertIn("not messaging chats", pins.command_pins(None, "list", platform=platform))
         self.assertEqual([], pins.session_rows())
 
     def test_named_profile_isolation(self):
         sid = self.chat()
+        self.chat("default-only", "Default only")
         pins.set_pin(sid, True)
         other = self.home / "other-profile"
         other.mkdir()
         with patch.dict(os.environ, {"HERMES_HOME": str(other)}):
             with SessionDB(db_path=other / "state.db") as db:
                 db.create_session(sid, source="cli")
+                db.set_session_title(sid, "Main project")
+                named = "named-only"
+                db.create_session(named, source="cli")
                 self.assertEqual([], pins.session_rows())
-                pins.set_pin(sid, True)
+                result = pins.command_pin("Default only", session_id=named, platform="tui")
+                self.assertIn("not found", result)
+                self.assertIn("★ Pinned", pins.command_pin("Main project", session_id=named, platform="tui"))
                 self.assertEqual([sid], [r["id"] for r in pins.session_rows()])
-                pins.set_pin(sid, False)
+                self.assertIn("Unpinned", pins.command_pin(sid, session_id=named, platform="tui", pinned=False))
+                self.assertFalse(db.get_session(sid)["pinned"])
+                self.assertFalse(db.get_session(named)["pinned"])
         self.assertEqual([sid], [r["id"] for r in pins.session_rows()])
 
     def test_compression_pin_and_unpin_cover_lineage(self):
         root = self.chat("root-session", "Long conversation")
         self.db.end_session(root, "compression")
         tip = self.chat("tip-session", "Long conversation continued", parent_session_id=root)
-        pins.set_pin(tip, True)
+        self.assertIn("★ Pinned", pins.command_pin("Long conversation", platform="tui"))
         self.assertEqual(1, self.db.get_session(root)["pinned"])
+        self.assertEqual(1, self.db.get_session(tip)["pinned"])
         rows = pins.session_rows()
         self.assertEqual([tip], [r["id"] for r in rows])
         pins.set_pin(tip, False)
@@ -122,13 +212,16 @@ class PinsTests(unittest.TestCase):
     def test_archived_pin_is_still_reachable(self):
         sid = self.chat()
         self.db.set_session_archived(sid, True)
-        pins.set_pin(sid, True)
+        for i in range(41):
+            self.chat(f"new-{i}", f"New {i}")
+        self.assertIn("★ Pinned", pins.command_pin("Main project", platform="tui"))
+        self.assertTrue(self.db.get_session(sid)["archived"])
         self.assertEqual([sid], [r["id"] for r in pins.session_rows()])
 
     def test_hidden_bot_chat_stays_hidden_after_successful_pin(self):
         sid = self.chat("hidden-bot", self.db.CANONICAL_BOT_CHAT_TITLE)
         self.db.set_session_hidden(sid, True)
-        result = pins.command_pin(sid, platform="tui")
+        result = pins.command_pin(self.db.CANONICAL_BOT_CHAT_TITLE, platform="tui")
         self.assertIn("★ Pinned", result)
         self.assertIn("still marked hidden", result)
         self.assertNotIn("Find it with", result)
@@ -221,10 +314,13 @@ class PinsTests(unittest.TestCase):
 
     def test_stale_current_id_never_mutates_a_longer_surviving_id(self):
         longer = self.chat("gone-longer", "Surviving chat")
+        titled = self.chat("different-id", "gone")
         self.db.set_session_pinned(longer, True)
+        self.db.set_session_pinned(titled, True)
         result = pins.command_pin("", session_id="gone", platform="tui", pinned=False)
         self.assertIn("no longer exists", result)
         self.assertTrue(self.db.get_session(longer)["pinned"])
+        self.assertTrue(self.db.get_session(titled)["pinned"])
 
     def test_stale_slash_manage_selection_never_unpins_a_longer_id(self):
         short = self.chat("gone", "Removed chat")
@@ -309,6 +405,16 @@ class PinsTests(unittest.TestCase):
                     env=dict(os.environ, HERMES_HOME=str(self.home)),
                 )
                 self.assertEqual(str(self.home), os.environ["HERMES_HOME"])
+
+    def test_shell_pin_and_unpin_accept_a_title_as_one_argument(self):
+        sid = self.chat()
+        parser = argparse.ArgumentParser()
+        pins.setup_cli(parser)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(0, pins.cli(parser.parse_args(["pin", "Main project"])))
+            self.assertTrue(self.db.get_session(sid)["pinned"])
+            self.assertEqual(0, pins.cli(parser.parse_args(["unpin", "Main project"])))
+            self.assertFalse(self.db.get_session(sid)["pinned"])
 
     @unittest.skipUnless(os.name == "posix", "printed commands use POSIX shell syntax")
     def test_cli_list_plain_output(self):

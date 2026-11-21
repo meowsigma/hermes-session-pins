@@ -20,11 +20,21 @@ catalog, reopen that client. No background-service restart is required by this p
 |---|---|
 | `/pin` | Pin the current chat; safe to repeat. |
 | `/unpin` | Unpin the current chat. |
-| `/pin <session-id>` | Pin another chat by full ID or unambiguous prefix. |
-| `/unpin <session-id>` | Unpin that chat. |
+| `/pin example-session` | Pin the chat with that exact stored title without switching chats. |
+| `/pin LOCAL_ID` | Pin the chat with that full local session ID. |
+| `/unpin <title-or-id>` | Unpin the target using the same rules. |
 | `/pins` | Choose a visible starred pin and get its `/resume` command, if it can be copied safely. |
 | `/pins list` | List visible pins and their available `/resume` commands. |
 | `/pins manage` | Choose a pin, then show its resume command or unpin it. |
+
+Type titles with spaces as-is, for example `/pin My Project` (no quotes). A
+full ID wins if it also happens to be another chat's title. Otherwise an exact,
+case-sensitive stored title wins. If neither matches, an explicitly typed ID
+prefix is accepted only if Hermes finds one match and the prefix's case matches.
+Duplicate titles, ambiguous prefixes, and unknown selectors do not change pins.
+Use the full ID to disambiguate. Title matching doesn't use previews, partial
+titles, or newer `#2`-style names as fallbacks. The search covers the active
+profile's stored chats, not just the recent or visible list.
 
 **Important: this does not change the built-in `/resume` picker.** Hermes reserves
 that command and does not expose a session-picker sorting/decorating hook. Plugin
@@ -57,7 +67,8 @@ Hermes chat client; it does not replace another already-open terminal's session.
 
 ```sh
 hermes pins list             # Plain list of visible pins
-hermes pins pin SESSION_ID  # Pin from the shell
+hermes pins pin SESSION_ID   # Pin from the shell
+hermes pins pin "My Project" # Same selectors; quote a title with spaces in the shell
 hermes pins unpin SESSION_ID
 hermes pins --print          # Pick, then print the shell resume command only
 hermes -p work pins          # Use the work profile's sessions
@@ -73,9 +84,11 @@ profile.
 Pins use Hermes's own `SessionDB.set_session_pinned` metadata in the active
 profile's `state.db`. They survive plugin updates/removal and share the same pins
 as `hermes sessions pin` and Desktop. Native pins are exempt from Hermes's
-auto-archive sweep. Native pinning can unhide an explicitly chosen hidden chat;
-the plugin never archives, deletes, renames, rewrites timestamps, or changes chat
-contents. Compression-lineage handling stays with Hermes itself.
+auto-archive sweep. An archived target remains archived. Native pinning can
+unhide an explicitly targeted hidden chat, but preserves the canonical hidden
+Bot Chat and the picker's native visibility filters. The plugin doesn't write
+titles, timestamps, or chat contents. Hermes applies pin changes across its
+native compression lineage; a separate caller chat is unaffected.
 
 Slash commands are limited to local terminal/Desktop surfaces; messaging chats
 cannot enumerate or modify your local pins through this plugin. No secrets or
@@ -84,8 +97,8 @@ characters. If a session ID cannot be copied safely, no resume command is
 printed for it; the stored ID is not changed. Direct launching uses an exact
 argument vector, without a shell, and preserves the selected home/profile.
 Homes that Hermes would reinterpret on child startup are refused rather than
-redirected. Prefix matching applies only to explicitly typed pin/unpin selectors;
-a selected or current session that disappeared is never replaced by a prefix match.
+redirected. A current or picker-selected session ID that disappeared never falls
+back to a title or prefix match.
 
 ## Remove
 

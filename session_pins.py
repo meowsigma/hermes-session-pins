@@ -33,6 +33,10 @@ def title(row: dict) -> str:
     return clean_label(row.get("title") or row.get("preview")) or "Untitled chat"
 
 
+def command_error(exc: Exception) -> str:
+    return "Session Pins: " + (clean_label(exc, limit=300) or "The command failed. Try again.")
+
+
 def display_id(sid: str) -> str:
     return sid if sid.isprintable() else ascii(sid)
 
@@ -49,27 +53,61 @@ def database(*, writable: bool = False, home: Path | None = None):
         yield db
 
 
-def resolve(db, value: str) -> dict:
+def resolve_selector(db: SessionDB, value: str) -> tuple[str, bool]:
+    """Return the exact key and whether it was selected by title."""
+    if db.get_session(value) is not None:
+        return value, False
+
+    # Native resume prefers newer numbered titles. The exact-title API also
+    # returns only one row, so use it as a hit probe, not a uniqueness check.
+    if db.get_session_by_title(value) is not None:
+        # Legacy stores can contain duplicates. Check a single unpaged read
+        # of stored rows, not the visible picker's projected lineages.
+        matches = [row["id"] for row in db.list_sessions_rich(
+            limit=-1, include_children=True, project_compression_tips=False,
+            include_archived=True, include_hidden=True, include_subagents=True,
+            compact_rows=True,
+        ) if row.get("title") == value]
+        if len(matches) > 1:
+            raise PinsError("That title is ambiguous in this profile. Use the full session ID.")
+        if not matches:
+            raise PinsError("That title changed during lookup. Retry or use the full session ID.")
+        return matches[0], True
+
+    # Native prefix lookup refuses multiple candidates and escapes LIKE
+    # wildcards. Require a literal prefix as well (SQLite LIKE folds ASCII case).
     sid = db.resolve_session_id(value)
-    if not sid:
-        raise PinsError("Session not found, or that ID prefix is ambiguous. Use the full session ID.")
-    row = db.get_session(sid)
-    if not row:
-        raise PinsError("That session no longer exists.")
-    return row
+    if not sid or not sid.startswith(value):
+        raise PinsError("Session not found in this profile, or that ID prefix is ambiguous. "
+                        "Use the exact title or full session ID.")
+    return sid, False
 
 
 def set_pin(value: str, pinned: bool, *, exact: bool = False) -> dict:
     if not value:
-        raise PinsError("No current session yet. Send a message first, or provide a session ID.")
-    with database(writable=True) as db:
-        # Known UI/current-session IDs must never fall back to a longer prefix.
-        row = db.get_session(value) if exact else resolve(db, value)
+        raise PinsError("No current session yet. Send a message first, or provide a title or full session ID.")
+    home = Path(get_hermes_home())
+    missing = "That session no longer exists in this profile. Refresh or use a full session ID."
+    # Resolve before opening a writer, which could repair legacy duplicate
+    # titles. A failed selector shouldn't change the store at all.
+    with database(home=home) as db:
+        if exact:
+            # Current/picker IDs never fall back to a title or prefix match.
+            if db.get_session(value) is None:
+                raise PinsError(missing)
+            sid, by_title = value, False
+        else:
+            sid, by_title = resolve_selector(db, value)
+    with database(writable=True, home=home) as db:
+        # Recheck only the selected key. Never re-resolve a disappearing target.
+        row = db.get_session(sid)
         if row is None:
-            raise PinsError("That session no longer exists.")
-        if not db.set_session_pinned(row["id"], pinned):
-            raise PinsError("Hermes could not update that session's pin.")
-        updated = db.get_session(row["id"])
+            raise PinsError(missing)
+        if by_title and row.get("title") != value:
+            raise PinsError("That title changed during lookup. Retry or use the full session ID.")
+        if not db.set_session_pinned(sid, pinned):
+            raise PinsError("Hermes could not update that session's pin. Refresh and try again.")
+        updated = db.get_session(sid)
         if updated is None or bool(updated.get("pinned")) != pinned:
             raise PinsError("Hermes did not confirm the pin change. Try again.")
         return updated
@@ -153,7 +191,7 @@ def command_pin(raw_args: str, *, session_id: str = "", platform: str = "", pinn
             return f"{STAR} Pinned: {title(row)}\n{hint}"
         return f"Unpinned: {title(row)}"
     except (PinsError, OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
-        return f"Session Pins: {exc}"
+        return command_error(exc)
 
 
 def command_pins(ctx, raw_args: str, *, platform: str = "") -> str:
@@ -189,7 +227,7 @@ def command_pins(ctx, raw_args: str, *, platform: str = "") -> str:
         # Never pretend this switches the active TUI or inject a model turn.
         return f"{STAR} {title(row)}\nRun this in your current chat:\n{resume_command(row['id'])}"
     except (PinsError, OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
-        return f"Session Pins: {exc}"
+        return command_error(exc)
 
 
 def picker(rows: list[dict], *, input=None, output=None) -> dict | None:
@@ -320,7 +358,8 @@ def picker(rows: list[dict], *, input=None, output=None) -> dict | None:
 
 def setup_cli(parser):
     parser.add_argument("action", nargs="?", choices=["pick", "list", "pin", "unpin"], default="pick")
-    parser.add_argument("session_id", nargs="?", help="Session ID or unambiguous prefix for pin/unpin")
+    parser.add_argument("session_id", metavar="selector", nargs="?",
+                        help="Full session ID, exact title (quote spaces), or unique ID prefix for pin/unpin")
     parser.add_argument("--print", dest="print_only", action="store_true", help="Print the selected resume command instead of launching Hermes")
 
 
@@ -328,12 +367,12 @@ def cli(args):
     try:
         if args.action in {"pin", "unpin"}:
             if not args.session_id:
-                raise PinsError(f"Usage: hermes pins {args.action} <session-id>")
+                raise PinsError(f"Usage: hermes pins {args.action} <full-id-or-title>")
             row = set_pin(args.session_id, args.action == "pin")
             print(f"{'★ Pinned' if args.action == 'pin' else 'Unpinned'}: {title(row)}")
             return 0
         if args.session_id:
-            raise PinsError("A session ID is accepted only with pin or unpin.")
+            raise PinsError("A session selector is accepted only with pin or unpin.")
         home = Path(get_hermes_home()).absolute()
         rows = session_rows(recent=args.action == "pick", home=home)
         if args.action == "list":
@@ -365,12 +404,13 @@ def cli(args):
         return subprocess.call([executable, *resume_argv(selected["id"], home)],
                                env=dict(os.environ, HERMES_HOME=path))
     except (PinsError, OSError, RuntimeError, ValueError, sqlite3.Error, EOFError) as exc:
-        print(f"Session Pins: {exc}", file=sys.stderr)
+        print(command_error(exc), file=sys.stderr)
         return 1
 
 
 def register(ctx):
-    ctx.register_command("pin", command_pin, description="★ Pin this chat", args_hint="[session-id]")
+    ctx.register_command("pin", command_pin, description="★ Pin this chat or another by exact title or session ID",
+                         args_hint="[title-or-id]")
 
     def unpin(raw_args: str, *, session_id: str = "", platform: str = ""):
         return command_pin(raw_args, session_id=session_id, platform=platform, pinned=False)
@@ -378,6 +418,7 @@ def register(ctx):
     def pins(raw_args: str, *, platform: str = ""):
         return command_pins(ctx, raw_args, platform=platform)
 
-    ctx.register_command("unpin", unpin, description="Unpin this chat", args_hint="[session-id]")
+    ctx.register_command("unpin", unpin, description="Unpin this chat or another by exact title or session ID",
+                         args_hint="[title-or-id]")
     ctx.register_command("pins", pins, description="★ Find or manage pinned chats", args_hint="[list|manage]")
     ctx.register_cli_command("pins", "★ Pick, resume, or manage pinned Hermes chats", setup_cli, cli)
