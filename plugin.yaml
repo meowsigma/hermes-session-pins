@@ -1,6 +1,6 @@
 name: session-pins
-version: 0.3.0
-description: "★ Pin important chats and find them in a local terminal picker."
+version: 0.4.0.dev1
+description: "★ Native in-chat Session Pins UI preview; no core patch."
 author: meowsigma
 kind: standalone
 requires_hermes: ">=0.22.5"

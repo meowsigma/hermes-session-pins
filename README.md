@@ -3,6 +3,44 @@
 Keep important Hermes chats easy to find without deleting your worker chats.
 A small Python plugin: no model calls, network requests, extra packages, or core patches.
 
+## Native in-chat UI preview (this development branch)
+
+`0.4.0.dev1` is an unpublished local preview, separate from the rejected
+core-dependent candidate. The stable GitHub install below still supplies 0.3.0.
+The native widget is plain ESM for the Node runtime Hermes Ink already uses;
+it installs no packages and imports no private Hermes frontend code.
+
+After explicitly installing this local plugin build, run `hermes pins install-ui`
+once. Then **`/pins` opens inside the existing Ink chat**, not a new terminal,
+browser or second Hermes chat. The widget hot-loads; `/widgets-reload` is the
+stock fallback if discovery is delayed. No restart is required.
+
+- Starts on Pinned; **Tab** switches Pinned / All visible chats.
+- Type to search full stored titles and IDs; **↑/↓** selects; Page Up/Down scrolls.
+- Shows stored model and last activity, selection highlight and selected ID.
+- **Enter copies the exact `/resume ID` and closes. Paste and confirm in the
+  same composer to actually open it.** It never sends fake keys or changes models.
+- **Ctrl+P copies `/pin ID` or `/unpin ID` and closes**; paste and confirm in
+  this chat to apply it, then reopen or Ctrl+R refresh. This is deliberately NOT
+  a direct selected-row mutation: stock public SDK lacks the safe selection
+  transaction/lifecycle API. Explicit typed pin commands remain unchanged.
+  The copied argument preserves the selected ID, but pasted commands use the
+  stock typed-selector rules in the current profile. If the row disappears or
+  the profile changes before confirmation, refresh/reselect rather than assuming
+  the command still resolves to the old target.
+- **Esc** closes without a command, answer, pause request or pin change.
+- **Ctrl+U** clears search; **Ctrl+R** refreshes. Clipboard failure keeps the
+  picker open with an error. POSIX clipboard utilities: `wl-copy` on Wayland,
+  `xclip` on X11, `pbcopy` on macOS. Windows clipboard is not implemented here.
+
+Copy/paste is the temporary navigation and pin-management handoff, not automatic
+Enter-to-open or a tested live-turn continuity claim. This preview has not yet
+completed real native interactive acceptance; the owner will test it. No native
+runtime test has been run on the owner's PC for this milestone.
+
+`hermes pins remove-ui` removes only the exact unchanged bundled widget. Plugin
+removal alone does not remove this explicitly installed user-widget file.
+
 ## Install
 
 ```sh
@@ -14,7 +52,7 @@ profile you use (`hermes -p work plugins install … --enable` for a named profi
 The normal Hermes plugin reload applies; if a running client has a stale command
 catalog, reopen that client. No background-service restart is required by this plugin.
 
-## In your chat
+## Classic CLI / Desktop choice UI
 
 | Command | Action |
 |---|---|
@@ -23,7 +61,7 @@ catalog, reopen that client. No background-service restart is required by this p
 | `/pin example-session` | Pin the chat with that exact stored title without switching chats. |
 | `/pin LOCAL_ID` | Pin the chat with that full local session ID. |
 | `/unpin <title-or-id>` | Unpin the target using the same rules. |
-| `/pins` | Choose a visible starred pin and get its `/resume` command, if it can be copied safely. |
+| `/pins` | Choose a visible starred pin and get its `/resume` command (native overlay in Ink when installed). |
 | `/pins list` | List visible pins and their available `/resume` commands. |
 | `/pins manage` | Choose a pin, then show its resume command or unpin it. |
 
@@ -39,7 +77,7 @@ profile's stored chats, not just the recent or visible list.
 **Important: this does not change the built-in `/resume` picker.** Hermes reserves
 that command and does not expose a session-picker sorting/decorating hook. Plugin
 command results also cannot switch the active frontend session. `/pins` uses
-Hermes's existing choice UI and prints the command to run; it does not pretend it
+Hermes's existing choice UI outside Ink and prints the command to run; it does not pretend it
 has already switched chats. Pin labels have a ★; the native choice UI owns its colors.
 
 For a highlighted picker that **does resume your selection**, run this from a

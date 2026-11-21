@@ -205,6 +205,11 @@ def command_pins(ctx, raw_args: str, *, platform: str = "") -> str:
             return "Usage: /pins [list|manage]. Pin this chat with /pin; remove its pin with /unpin."
         home = Path(get_hermes_home()).absolute()
         rows = session_rows(home=home)
+        # The native user widget owns /pins in Ink. Never fall back to a
+        # blocking clarification if that widget hasn't loaded successfully.
+        if platform == "tui" and mode != "list":
+            return ("Use /widgets-reload, then /pins for the native picker. "
+                    "Install it once with hermes pins install-ui. /pins list is the text fallback.")
         if not rows:
             return "No pinned chats in this list. Use /pin in a chat you want to keep."
         if mode == "list":
@@ -362,7 +367,7 @@ def picker(rows: list[dict], *, home: Path | None = None, input=None, output=Non
 
 
 def setup_cli(parser):
-    parser.add_argument("action", nargs="?", choices=["pick", "list", "pin", "unpin"], default="pick")
+    parser.add_argument("action", nargs="?", choices=["pick", "list", "pin", "unpin", "data", "install-ui", "remove-ui"], default="pick")
     parser.add_argument("session_id", metavar="selector", nargs="?",
                         help="Full session ID, exact title (quote spaces), or unique ID prefix for pin/unpin")
     parser.add_argument("--print", dest="print_only", action="store_true", help="Print the selected resume command instead of launching Hermes")
@@ -370,6 +375,22 @@ def setup_cli(parser):
 
 def cli(args):
     try:
+        if args.action in {"data", "install-ui", "remove-ui"}:
+            if args.session_id or args.print_only:
+                raise PinsError("This action takes no selector or --print argument.")
+            if __package__:
+                from . import tui_bridge
+            else:
+                import tui_bridge
+            home = Path(get_hermes_home()).absolute()
+            if args.action == "data":
+                import json
+                print(json.dumps(tui_bridge.inventory(home), ensure_ascii=True))
+            elif args.action == "install-ui":
+                print(f"Native widget installed: {tui_bridge.install(home)}\nUse /pins in the existing Ink chat; /widgets-reload if needed.")
+            else:
+                print(f"Native widget removed: {tui_bridge.remove(home)}")
+            return 0
         if args.action in {"pin", "unpin"}:
             if not args.session_id:
                 raise PinsError(f"Usage: hermes pins {args.action} <full-id-or-title>")

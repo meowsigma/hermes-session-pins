@@ -295,7 +295,7 @@ class PinsTests(unittest.TestCase):
                 self.choices = choices
                 return sid
         ctx = Context()
-        result = pins.command_pins(ctx, "", platform="tui")
+        result = pins.command_pins(ctx, "", platform="cli")
         self.assertIn("Run this in your current chat:", result)
         self.assertIn(f"/resume {sid}", result)
         self.assertTrue(ctx.choices[0]["label"].startswith("★ "))
@@ -308,9 +308,9 @@ class PinsTests(unittest.TestCase):
                 self.answers = iter(answers)
             def ask_choice(self, question, choices):
                 return next(self.answers)
-        self.assertIn("No chat selected", pins.command_pins(Context([None]), "", platform="tui"))
+        self.assertIn("No chat selected", pins.command_pins(Context([None]), "", platform="cli"))
         self.assertEqual(1, self.db.get_session(sid)["pinned"])
-        self.assertIn("Unpinned", pins.command_pins(Context([sid, "unpin"]), "manage", platform="tui"))
+        self.assertIn("Unpinned", pins.command_pins(Context([sid, "unpin"]), "manage", platform="cli"))
         self.assertEqual(0, self.db.get_session(sid)["pinned"])
 
     def test_slash_manage_unpins_in_the_profile_that_supplied_the_choice(self):
@@ -325,7 +325,7 @@ class PinsTests(unittest.TestCase):
             self.assertEqual("★ Source profile chat", choices[0]["label"])
             return choices[0]["value"]
 
-        result = pins.command_pins(Mock(ask_choice=choose), "manage", platform="tui")
+        result = pins.command_pins(Mock(ask_choice=choose), "manage", platform="cli")
         with SessionDB(db_path=other / "state.db", read_only=True) as db:
             actual = (bool(self.db.get_session(sid)["pinned"]), bool(db.get_session(sid)["pinned"]))
         self.assertEqual((False, True), actual)
@@ -355,7 +355,7 @@ class PinsTests(unittest.TestCase):
         for mode in ("", "manage"):
             with self.subTest(mode=mode):
                 ctx = Mock(ask_choice=select_odd)
-                result = pins.command_pins(ctx, mode, platform="tui")
+                result = pins.command_pins(ctx, mode, platform="cli")
                 self.assertIn("cannot be copied safely", result)
                 self.assertNotIn("\t", result)
                 self.assertNotIn("/resume chat-spaced", result)
@@ -367,7 +367,7 @@ class PinsTests(unittest.TestCase):
             self.db.set_session_pinned(sid, True)
         ctx = Mock()
         ctx.ask_choice.side_effect = [odd, "unpin"]
-        self.assertIn("Unpinned: Unusual ID", pins.command_pins(ctx, "manage", platform="tui"))
+        self.assertIn("Unpinned: Unusual ID", pins.command_pins(ctx, "manage", platform="cli"))
         self.assertTrue(self.db.get_session(safe)["pinned"])
         self.assertFalse(self.db.get_session(odd)["pinned"])
 
@@ -405,7 +405,7 @@ class PinsTests(unittest.TestCase):
                 return "unpin"
             self.db.delete_session(short)
             return short
-        result = pins.command_pins(Mock(ask_choice=choose), "manage", platform="tui")
+        result = pins.command_pins(Mock(ask_choice=choose), "manage", platform="cli")
         self.assertIn("no longer exists", result)
         self.assertTrue(self.db.get_session(longer)["pinned"])
 
