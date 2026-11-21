@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 (candidate)
+## 0.3.0
 
 - `/pin` and `/unpin` can target another chat in the active profile by its
   exact stored title (including spaces) or full local ID, without switching
