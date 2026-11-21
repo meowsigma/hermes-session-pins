@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.3.9
+
+- Add an optional native `/pins` modal inside the existing Hermes Ink chat,
+  using the stock public widget SDK with no core patch, browser or second chat.
+- Search full stored titles and IDs, switch Pinned / All with Tab, select with
+  arrows/Page keys, and see stored model, last activity and the selected ID.
+- Enter copies `/resume ID` and closes; Ctrl+P copies `/pin ID` or `/unpin ID`.
+  Paste and confirm in the current composer to apply either command. This is
+  not automatic navigation or direct selected-row mutation; refresh/reselect
+  after profile changes or deleted rows because pasted selectors resolve again.
+- Esc closes without a choice answer or pin change; Ctrl+U clears search and
+  Ctrl+R refreshes. Inventory is read-only and follows native visibility rules.
+- Add `hermes pins install-ui` and `hermes pins remove-ui`. Widget installation
+  is explicit and hot-loaded; modified user-widget files are preserved.
+- In Ink without the widget, `/pins` gives setup instructions instead of
+  opening a blocking choice prompt. Classic CLI/Desktop choice behavior and
+  the standalone shell picker remain available; built-in `/resume` is unchanged.
+- Verification: independent Astra 6.2 source review, syntax checks, native
+  zero-warning plugin validation and live widget registration. Automated
+  product suites and native interactive acceptance are not yet completed for
+  this build; no full-runtime pass is claimed.
+
+Upgrade with `hermes plugins update session-pins`, then run
+`hermes pins install-ui` in each profile where you want the Ink picker.
+
 ## 0.3.0
 
 - `/pin` and `/unpin` can target another chat in the active profile by its

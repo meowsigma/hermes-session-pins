@@ -3,14 +3,13 @@
 Keep important Hermes chats easy to find without deleting your worker chats.
 A small Python plugin: no model calls, network requests, extra packages, or core patches.
 
-## Native in-chat UI preview (this development branch)
+## Native in-chat picker (0.3.9)
 
-`0.4.0.dev1` is an unpublished local preview, separate from the rejected
-core-dependent candidate. The stable GitHub install below still supplies 0.3.0.
+The in-chat picker uses Hermes's stock widget SDK and needs no core patch.
 The native widget is plain ESM for the Node runtime Hermes Ink already uses;
 it installs no packages and imports no private Hermes frontend code.
 
-After explicitly installing this local plugin build, run `hermes pins install-ui`
+After installing the plugin, run `hermes pins install-ui`
 once. Then **`/pins` opens inside the existing Ink chat**, not a new terminal,
 browser or second Hermes chat. The widget hot-loads; `/widgets-reload` is the
 stock fallback if discovery is delayed. No restart is required.
@@ -33,10 +32,11 @@ stock fallback if discovery is delayed. No restart is required.
   picker open with an error. POSIX clipboard utilities: `wl-copy` on Wayland,
   `xclip` on X11, `pbcopy` on macOS. Windows clipboard is not implemented here.
 
-Copy/paste is the temporary navigation and pin-management handoff, not automatic
-Enter-to-open or a tested live-turn continuity claim. This preview has not yet
-completed real native interactive acceptance; the owner will test it. No native
-runtime test has been run on the owner's PC for this milestone.
+Copy/paste is the navigation and pin-management handoff, not automatic
+Enter-to-open or a tested live-turn continuity claim. Independent source review,
+syntax checks, native plugin validation and live widget registration were
+verified. Automated product tests and real native interactive acceptance have
+not yet been completed for this build; those checks are not implied by release.
 
 `hermes pins remove-ui` removes only the exact unchanged bundled widget. Plugin
 removal alone does not remove this explicitly installed user-widget file.
@@ -45,7 +45,13 @@ removal alone does not remove this explicitly installed user-widget file.
 
 ```sh
 hermes plugins install meowsigma/hermes-session-pins --enable
+hermes pins install-ui  # Enable the optional in-chat Ink picker
 ```
+
+For an existing installation, run `hermes plugins update session-pins`, then
+`hermes pins install-ui` to install or refresh the bundled widget in that same
+profile. The widget installer preserves a modified user-widget file rather than
+silently overwriting it.
 
 Requires Hermes **0.22.5+** with its native session-pin API. Install into the
 profile you use (`hermes -p work plugins install … --enable` for a named profile).
@@ -135,11 +141,16 @@ characters. If a session ID cannot be copied safely, no resume command is
 printed for it; the stored ID is not changed. Direct launching uses an exact
 argument vector, without a shell, and preserves the selected home/profile.
 Homes that Hermes would reinterpret on child startup are refused rather than
-redirected. A current or picker-selected session ID that disappeared never falls
-back to a title or prefix match. Picker pin changes stay in the profile that
-supplied the selection.
+redirected. Direct current-session and standalone-picker mutations refuse a
+missing exact ID instead of falling back to a title or prefix. Standalone-picker
+pin changes stay in the profile that supplied the selection. The in-chat
+widget's copied commands instead follow the typed-selector/current-profile
+rules when pasted, as explained above.
 
 ## Remove
+
+If you installed the Ink widget, run `hermes pins remove-ui` before removing the
+plugin. It removes only the unchanged bundled widget, preserving user edits.
 
 ```sh
 hermes plugins disable session-pins
