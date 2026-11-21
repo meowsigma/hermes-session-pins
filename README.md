@@ -1,7 +1,7 @@
 # ★ Hermes Session Pins
 
 Keep important Hermes chats easy to find without deleting your worker chats.
-A small Python plugin: no model calls, network requests, extra packages, or core patches.
+A small Python plugin: no model calls, external network requests, or extra packages.
 
 ## Install
 
@@ -23,9 +23,10 @@ catalog, reopen that client. No background-service restart is required by this p
 | `/pin example-session` | Pin the chat with that exact stored title without switching chats. |
 | `/pin LOCAL_ID` | Pin the chat with that full local session ID. |
 | `/unpin <title-or-id>` | Unpin the target using the same rules. |
-| `/pins` | Choose a visible starred pin and get its `/resume` command, if it can be copied safely. |
+| `/pins` | Browse starred pins. In supported Ink TUI builds, Tab shows all eligible chats. |
 | `/pins list` | List visible pins and their available `/resume` commands. |
-| `/pins manage` | Choose a pin, then show its resume command or unpin it. |
+| `/pins find PROJECT NOTES` | Find eligible chats matching all the words, by title or ID, including older chats. |
+| `/pins manage` | Open the selector where supported; otherwise list eligible pins in plain text. |
 
 Type titles with spaces as-is, for example `/pin My Project` (no quotes). A
 full ID wins if it also happens to be another chat's title. Otherwise an exact,
@@ -36,11 +37,29 @@ Use the full ID to disambiguate. Title matching doesn't use previews, partial
 titles, or newer `#2`-style names as fallbacks. The search covers the active
 profile's stored chats, not just the recent or visible list.
 
-**Important: this does not change the built-in `/resume` picker.** Hermes reserves
-that command and does not expose a session-picker sorting/decorating hook. Plugin
-command results also cannot switch the active frontend session. `/pins` uses
-Hermes's existing choice UI and prints the command to run; it does not pretend it
-has already switched chats. Pin labels have a ★; the native choice UI owns its colors.
+**Ink TUI:** With the `tui/pins.mjs` companion and the separate Hermes
+session-widget host hook (API v1 in both Ink and the canonical gateway), `/pins`
+opens a themed, nonblocking overlay. Type to search; use ↑/↓ to move, PgUp/PgDn
+to page, Ctrl-P to pin/unpin, Enter to switch, or Esc to close. Tab toggles between
+pins and all eligible chats. Rows show last activity, the **recorded** model, and
+original/fork labels when known. The built-in `/resume` picker is unchanged.
+
+**Stock Hermes:** On classic CLI, Ink, and Desktop, `/pins` and `/pins manage`
+list eligible pins in plain text without asking a question or switching chats.
+Untitled chats show “Untitled chat”, not message previews. The list prints a
+`/resume` command only when safe; use `/pin` or `/unpin` to change pins. The
+Python fallback works without the core hook. The optional Ink companion is not
+installed or activated by the plugin.
+
+**Selected-write compatibility:** Agent bulk pin/unpin and Ctrl-P in both the
+native overlay and the standalone shell picker require the matching core's public
+`SessionDB.set_projected_session_pinned` API. It checks current exact projected
+eligibility in the write transaction and never unhides a selected chat. Without
+that API, these selected changes fail closed with an explanation; metadata
+search, plain listings, the shell picker's Enter handoff, and explicit typed
+`/pin` or `/unpin` still work. The proposed core patch also owns selector
+revocation and exact eligible native attachment.
+This unreleased candidate does not install or activate that separate core patch.
 
 For a highlighted picker that **does resume your selection**, run this from a
 separate shell—not as a command in your active chat:
@@ -62,11 +81,13 @@ Pins eligible under Hermes's native visibility filters are loaded
 even when they are older than that recent page. A chat that Hermes excludes,
 such as the canonical hidden Bot Chat, can stay pinned without appearing here.
 Type to filter by title/ID, use **↑/↓**, **Enter** to launch the selected chat, or
-**Ctrl-P** to pin/unpin the selection. **Esc** closes it. It launches the normal
-Hermes chat client; it does not replace another already-open terminal's session.
+**Ctrl-P** to pin/unpin the selection on a core with safe selected writes.
+**Esc** closes it. Enter launches the normal Hermes chat client; it does not
+replace another already-open terminal's session.
 
 ```sh
 hermes pins list             # Plain list of visible pins
+hermes pins find "project notes" # Search eligible chats, not just recently used ones
 hermes pins pin SESSION_ID   # Pin from the shell
 hermes pins pin "My Project" # Same selectors; quote a title with spaces in the shell
 hermes pins unpin SESSION_ID
@@ -81,8 +102,10 @@ profile.
 
 ## Storage and privacy
 
-Pins use Hermes's own `SessionDB.set_session_pinned` metadata in the active
-profile's `state.db`. They survive plugin updates/removal and share the same pins
+Pins use Hermes's own native `SessionDB` metadata in the active profile's
+`state.db`: explicit commands use `set_session_pinned`, while selected changes
+require `set_projected_session_pinned`. They survive plugin updates/removal and
+share the same pins
 as `hermes sessions pin` and Desktop. Native pins are exempt from Hermes's
 auto-archive sweep. An archived target remains archived. Native pinning can
 unhide an explicitly targeted hidden chat, but preserves the canonical hidden
@@ -100,6 +123,14 @@ Homes that Hermes would reinterpret on child startup are refused rather than
 redirected. A current or picker-selected session ID that disappeared never falls
 back to a title or prefix match. Picker pin changes stay in the profile that
 supplied the selection.
+
+The local `session_pins_manage` tool offers `find`, `pin` and `unpin`. `find`
+returns metadata only, paginates with `next_offset`, and includes the source
+profile's `scope`. For `pin` or `unpin`, echo that `scope` with up to 50 selected
+exact IDs from the results. A missing or foreign scope is refused; run `find`
+again if you change profiles. Missing or no-longer-visible IDs are not resolved
+by title or prefix. The scope guards against profile mix-ups, not unauthorized
+callers: Hermes must still identify a visible, stored local owner chat.
 
 ## Remove
 

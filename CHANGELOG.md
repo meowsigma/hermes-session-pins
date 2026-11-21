@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0
+
+- Search visible chats by title words or ID beyond the recent list, with truthful
+  pages and counts, recorded model, last activity, and confirmed fork labels.
+- Add a local agent tool for discovery and exact-ID bulk pin/unpin.
+- Add an optional nonblocking Ink `/pins` selector with keyboard search,
+  pin/unpin, and native session switching. It requires the separate Hermes
+  session-widget hook; stock Ink and Desktop use plain output without asking a
+  question. Classic CLI still provides its original prompt and resume handoff.
+
 ## 0.3.0
 
 - `/pin` and `/unpin` can target another chat in the active profile by its

@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timezone
+import hashlib
+import json
 from pathlib import Path
 import os
 import re
@@ -17,13 +20,18 @@ from hermes_state import SessionDB
 
 STAR = "★"
 LOCAL_SURFACES = {"cli", "tui", "local", "desktop"}
+BACKGROUND_SOURCES = {"tool", "cron", "kanban", "delegate", "subagent", "system"}
+MAX_PAGE = 50
+MAX_BULK = 50
+MAX_QUERY = 200
+DISPLAY_LABEL_LIMIT = 90
 
 
 class PinsError(RuntimeError):
     """An actionable error safe to show in a command response."""
 
 
-def clean_label(value: object, limit: int = 90) -> str:
+def clean_label(value: object, limit: int | None = DISPLAY_LABEL_LIMIT) -> str:
     """Keep stored titles from injecting terminal escape/control sequences."""
     text = "".join(c for c in str(value or "") if not unicodedata.category(c).startswith("C"))
     return re.sub(r"\s+", " ", text).strip()[:limit]
@@ -86,11 +94,25 @@ def resolve_selector(db: SessionDB, value: str) -> tuple[str, bool]:
     return matches[0], False
 
 
-def set_pin(value: str, pinned: bool, *, exact: bool = False, home: Path | None = None) -> dict:
+def set_pin(value: str, pinned: bool, *, exact: bool = False, home: Path | None = None,
+            visible_only: bool = False, widget_admit=None) -> dict:
     if not value:
         raise PinsError("No current session yet. Send a message first, or provide a title or full session ID.")
     home = Path(get_hermes_home()) if home is None else home
     missing = "That session no longer exists in this profile. Refresh or use a full session ID."
+    if visible_only:
+        if not exact:
+            raise PinsError("Select an exact session ID.")
+        if not callable(getattr(SessionDB, "set_projected_session_pinned", None)):
+            raise PinsError("Selected pin changes require a Hermes build with safe session selection support. "
+                            "Use /pin or /unpin with an explicit ID instead.")
+        with database(writable=True, home=home) as db:
+            if not db.set_projected_session_pinned(value, pinned, admit=widget_admit):
+                raise PinsError("Session is missing or not visible in this profile. Search for it again.")
+            updated = db.get_session(value)
+            if updated is None or bool(updated.get("pinned")) != pinned:
+                raise PinsError("Hermes did not confirm the pin change. Try again.")
+            return updated
     # Resolve before opening a writer, which could repair legacy duplicate
     # titles. A failed selector shouldn't change the store at all.
     with database(home=home) as db:
@@ -129,6 +151,164 @@ def session_rows(*, recent: bool = False, home: Path | None = None) -> list[dict
         -float(r.get("last_active") or r.get("started_at") or 0),
         r["id"],
     ))
+
+
+def discoverable(row: dict) -> bool:
+    # The native query hides delegates; also check the projected row, which
+    # can differ from the root on which native SQL filters were applied.
+    if (row.get("hidden") or row.get("source") in BACKGROUND_SOURCES
+            or row.get("archived") and not row.get("pinned")):
+        return False
+    config = row.get("model_config")
+    if isinstance(config, str):
+        try:
+            config = json.loads(config)
+        except ValueError:
+            config = None
+    return not (isinstance(config, dict) and config.get("_delegate_from"))
+
+
+def discovery_rows(db: SessionDB) -> list[dict]:
+    rows = db.list_sessions_rich(limit=-1, include_pinned=True, compact_rows=True,
+                                 exclude_sources=sorted(BACKGROUND_SOURCES))
+    visible = {}
+    exact_metadata = getattr(db, "get_session_list_row", db.get_session)
+    for row in rows:
+        if not discoverable(row):
+            continue
+        sid = row["id"]
+        if row.get("_lineage_root_id"):
+            # Native compression projection retains the root's visibility fields.
+            # A hidden tip must not leak its title, model, or ID through those fields.
+            tip = exact_metadata(sid)
+            if not tip or not discoverable({**row, **tip}):
+                continue
+        visible[sid] = row
+    return sorted(visible.values(), key=lambda row: (
+        not bool(row.get("pinned")), -activity(row), row["id"],
+    ))
+
+
+def activity(row: dict) -> float:
+    return float(row.get("last_active") or row.get("started_at") or 0)
+
+
+def discover_sessions(query: str = "", *, limit: int = 20, offset: int = 0,
+                      pinned_only: bool = False, home: Path | None = None) -> dict:
+    if not isinstance(query, str) or len(query) > MAX_QUERY:
+        raise PinsError(f"Search text must be at most {MAX_QUERY} characters.")
+    if type(limit) is not int or not 1 <= limit <= MAX_PAGE or type(offset) is not int or offset < 0:
+        raise PinsError(f"Use a page size between 1 and {MAX_PAGE} and a nonnegative offset.")
+    if type(pinned_only) is not bool:
+        raise PinsError("pinned_only must be true or false.")
+    with database(home=home) as db:
+        rows = discovery_rows(db)
+    # An explicit branch marker is evidence; an arbitrary parent edge is not.
+    handles = {sid: row["id"] for row in rows for sid in (row.get("_lineage_ids") or [row["id"]])}
+    handles.update({row["_lineage_root_id"]: row["id"] for row in rows if row.get("_lineage_root_id")})
+    originals = {handles.get(row.get("_branched_from")) for row in rows if row.get("_branched_from")}
+    terms = query.casefold().split()
+    matches = []
+    for row in rows:
+        if pinned_only and not row.get("pinned"):
+            continue
+        sid = row["id"]
+        full_title = clean_label(row.get("title"), limit=None) or "Untitled chat"
+        haystack = f"{full_title} {sid}".casefold()
+        if not all(term in haystack for term in terms):
+            continue
+        label = full_title[:DISPLAY_LABEL_LIMIT]
+        branch_from = row.get("_branched_from")
+        matches.append({
+            "id": sid, "display_id": display_id(sid), "title": label,
+            "pinned": bool(row.get("pinned")), "recorded_model": clean_label(row.get("model")) or None,
+            "last_active": activity(row), "relationship": "fork" if branch_from else "original" if sid in originals else None,
+            "original_id": handles.get(branch_from),
+        })
+    end = offset + limit
+    return {"sessions": matches[offset:end], "total": len(matches),
+            "next_offset": end if end < len(matches) else None}
+
+
+def bulk_set_pins(ids: list[str], pinned: bool, *, home: Path | None = None, widget_admit=None) -> list[dict]:
+    if (type(pinned) is not bool or not isinstance(ids, list) or not 1 <= len(ids) <= MAX_BULK
+            or any(not isinstance(sid, str) or not sid for sid in ids)):
+        raise PinsError(f"Supply 1–{MAX_BULK} exact session IDs and a boolean pin state.")
+    home = Path(get_hermes_home()).absolute() if home is None else home
+    results = []
+    for sid in dict.fromkeys(ids):
+        try:
+            row = set_pin(sid, pinned, exact=True, home=home, visible_only=True, widget_admit=widget_admit)
+            results.append({"id": sid, "ok": True, "pinned": bool(row["pinned"])})
+        except (PinsError, OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+            results.append({"id": sid, "ok": False, "error": command_error(exc)})
+    return results
+
+
+def discovery_tool(ctx, args: dict, *, session_id: str = "") -> str:
+    try:
+        surface = getattr(ctx, "session_surface", None)
+        require_local(surface() if callable(surface) else "")
+        if not session_id:
+            raise PinsError("Session discovery requires a bound local session.")
+        home = Path(get_hermes_home()).resolve()
+        with database(home=home) as db:
+            caller = db.get_session(session_id)
+        if not caller or caller.get("source") not in LOCAL_SURFACES or not discoverable(caller):
+            raise PinsError("Session discovery requires a visible, stored local owner chat.")
+        if not isinstance(args, dict):
+            raise PinsError("Expected discovery tool arguments.")
+        # Like the selector scope, this fences profile changes, not callers.
+        scope = hashlib.sha256(os.fsencode(home)).hexdigest()
+        action = args.get("action")
+        if action == "find":
+            result = discover_sessions(args.get("query", ""), limit=args.get("limit", 20),
+                                       offset=args.get("offset", 0), home=home)
+            result["scope"] = scope
+        elif action in ("pin", "unpin"):
+            if args.get("scope") != scope:
+                raise PinsError("Selection scope is missing or belongs to a different profile. "
+                                "Run find in the active profile and pass its returned scope.")
+            result = {"results": bulk_set_pins(args.get("ids"), action == "pin", home=home)}
+        else:
+            raise PinsError("Choose find, pin, or unpin.")
+        return json.dumps(result)
+    except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as exc:
+        return json.dumps({"error": command_error(exc)})
+
+
+def command_pins_ui(raw_args: str, *, platform: str = "", widget_admit=None) -> str:
+    """Structured request/response for the Ink companion; never asks a question."""
+    try:
+        require_local(platform)
+        home = Path(get_hermes_home()).absolute().resolve()
+        # Consistency fence, not authorization. Local-surface policy is checked
+        # above and the active profile comes from Hermes, never widget input.
+        scope = hashlib.sha256(os.fsencode(home)).hexdigest()
+        request = json.loads(raw_args)
+        if not isinstance(request, dict):
+            raise PinsError("Invalid selector request.")
+        if (request.get("op") != "list" or "scope" in request) and request.get("scope") != scope:
+            raise PinsError("The active profile changed. Close and reopen /pins.")
+        if request.get("op") == "list":
+            result = discover_sessions(request.get("query", ""), offset=request.get("offset", 0),
+                                       pinned_only=request.get("pinned_only", False), home=home)
+            result["scope"] = scope
+        elif request.get("op") == "set":
+            if not callable(widget_admit):
+                raise PinsError("Selector pin changes require an active native session selector.")
+            result, = bulk_set_pins([request.get("id")], request.get("pinned"), home=home,
+                                    widget_admit=widget_admit)
+        elif request.get("op") == "open":
+            with database(home=home) as db:
+                if not any(row["id"] == request.get("id") for row in discovery_rows(db)):
+                    raise PinsError("Session is missing or not visible in this profile. Refresh and try again.")
+            result = {"ok": True}
+        else:
+            raise PinsError("Invalid selector request.")
+        return json.dumps(result)
+    except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+        return json.dumps({"error": command_error(exc)})
 
 
 def resume_argv(sid: str, home: Path) -> list[str]:
@@ -197,39 +377,44 @@ def command_pin(raw_args: str, *, session_id: str = "", platform: str = "", pinn
         return command_error(exc)
 
 
+def discovery_text(query: str, home: Path) -> str:
+    result = discover_sessions(query, home=home)
+    if not result["sessions"]:
+        return "No matching visible chats. Try other title words or ID text."
+    lines = [f"Showing {len(result['sessions'])} of {result['total']} matching chats"]
+    for row in result["sessions"]:
+        marker = f"{STAR} " if row["pinned"] else ""
+        relation = f" · {row['relationship']}" if row["relationship"] else ""
+        model = row["recorded_model"] or "unknown"
+        stamp = (datetime.fromtimestamp(row['last_active'], tz=timezone.utc).strftime("%Y-%m-%d %H:%MZ")
+                 if row['last_active'] else "unknown")
+        lines.append(f"{marker}{row['title']}{relation} · recorded model: {model} · last active: {stamp}\n"
+                     f"  {row['display_id']}")
+    return "\n".join(lines)
+
+
 def command_pins(ctx, raw_args: str, *, platform: str = "") -> str:
     try:
         require_local(platform)
-        mode = raw_args.strip().lower()
-        if mode not in {"", "list", "manage"}:
-            return "Usage: /pins [list|manage]. Pin this chat with /pin; remove its pin with /unpin."
+        arg = raw_args.strip()
+        mode = arg.lower()
         home = Path(get_hermes_home()).absolute()
-        rows = session_rows(home=home)
+        if mode.split(maxsplit=1)[:1] == ["find"]:
+            return discovery_text(arg[4:].strip(), home)
+        if mode not in {"", "list", "manage"}:
+            return "Usage: /pins [list|manage|find [words]]. Pin or unpin a known chat with /pin or /unpin."
+        with database(home=home) as db:
+            rows = [row for row in discovery_rows(db) if row.get("pinned")]
         if not rows:
             return "No pinned chats in this list. Use /pin in a chat you want to keep."
-        if mode == "list":
-            return "\n".join(f"{STAR} {title(row)}\n  {resume_line(row['id'])}" for row in rows)
-        picked = ctx.ask_choice("Pinned chats — choose a chat", [
-            {"value": row["id"], "label": f"{STAR} {title(row)}", "description": display_id(row["id"])}
+        listing = "\n".join(
+            f"{STAR} {clean_label(row.get('title')) or 'Untitled chat'}\n  {resume_line(row['id'])}"
             for row in rows
-        ])
-        if not picked:
-            return "No chat selected. /pins list shows your pins without a picker."
-        row = next((r for r in rows if r["id"] == picked), None)
-        if row is None:
-            return "No chat selected."
-        if mode == "manage":
-            action = ctx.ask_choice(f"{STAR} {title(row)}", [
-                {"value": "resume", "label": "Show resume command"},
-                {"value": "unpin", "label": "Unpin this chat"},
-            ])
-            if action == "unpin":
-                return f"Unpinned: {title(set_pin(row['id'], False, exact=True, home=home))}"
-            if action != "resume":
-                return "No change."
-        # Plugin handlers return text, not frontend session-switch directives.
-        # Never pretend this switches the active TUI or inject a model turn.
-        return f"{STAR} {title(row)}\nRun this in your current chat:\n{resume_command(row['id'])}"
+        )
+        if mode == "list":
+            return listing
+        return ("Native selector not available here. Use /pin or /unpin with an exact ID, "
+                "or run hermes pins in a separate terminal.\n" + listing)
     except (PinsError, OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
         return command_error(exc)
 
@@ -335,7 +520,8 @@ def picker(rows: list[dict], *, home: Path | None = None, input=None, output=Non
         if not selected:
             return
         try:
-            set_pin(selected[index]["id"], not bool(selected[index].get("pinned")), exact=True, home=home)
+            set_pin(selected[index]["id"], not bool(selected[index].get("pinned")),
+                    exact=True, home=home, visible_only=True)
             rows = session_rows(recent=True, home=home)
             index = 0
             error = ""
@@ -362,9 +548,9 @@ def picker(rows: list[dict], *, home: Path | None = None, input=None, output=Non
 
 
 def setup_cli(parser):
-    parser.add_argument("action", nargs="?", choices=["pick", "list", "pin", "unpin"], default="pick")
-    parser.add_argument("session_id", metavar="selector", nargs="?",
-                        help="Full session ID, exact title (quote spaces), or unique ID prefix for pin/unpin")
+    parser.add_argument("action", nargs="?", choices=["pick", "list", "find", "pin", "unpin"], default="pick")
+    parser.add_argument("session_id", metavar="selector-or-query", nargs="?",
+                        help="Search words for find, or exact ID/title or unique ID prefix for pin/unpin (quote spaces)")
     parser.add_argument("--print", dest="print_only", action="store_true", help="Print the selected resume command instead of launching Hermes")
 
 
@@ -376,9 +562,12 @@ def cli(args):
             row = set_pin(args.session_id, args.action == "pin")
             print(f"{'★ Pinned' if args.action == 'pin' else 'Unpinned'}: {title(row)}")
             return 0
+        home = Path(get_hermes_home()).absolute()
+        if args.action == "find":
+            print(discovery_text(args.session_id or "", home))
+            return 0
         if args.session_id:
             raise PinsError("A session selector is accepted only with pin or unpin.")
-        home = Path(get_hermes_home()).absolute()
         rows = session_rows(recent=args.action == "pick", home=home)
         if args.action == "list":
             from rich.console import Console
@@ -425,5 +614,25 @@ def register(ctx):
 
     ctx.register_command("unpin", unpin, description="Unpin this chat or another by exact title or session ID",
                          args_hint="[title-or-id]")
-    ctx.register_command("pins", pins, description="★ Find or manage pinned chats", args_hint="[list|manage]")
+    ctx.register_command("pins", pins, description="★ Find or manage pinned chats", args_hint="[list|manage|find words]")
+    ctx.register_command("session-pins-ui", command_pins_ui, description="Session Pins selector data (local)")
+    ctx.register_tool(
+        name="session_pins_manage", toolset="session-pins",
+        schema={"name": "session_pins_manage",
+                "description": "Find visible local-profile chats by title words or ID text without returning transcript text, "
+                               "or pin/unpin user-selected exact IDs. Echo the scope returned by find for pin/unpin. "
+                               "If several matches fit, show choices before changing pins.",
+                "parameters": {"type": "object", "required": ["action"], "additionalProperties": False,
+                               "properties": {
+                                   "action": {"type": "string", "enum": ["find", "pin", "unpin"]},
+                                   "query": {"type": "string", "maxLength": MAX_QUERY},
+                                   "limit": {"type": "integer", "minimum": 1, "maximum": MAX_PAGE},
+                                   "offset": {"type": "integer", "minimum": 0},
+                                   "scope": {"type": "string", "description": "Required for pin/unpin: copy the scope "
+                                             "from the find result that supplied the selected IDs."},
+                                   "ids": {"type": "array", "minItems": 1, "maxItems": MAX_BULK,
+                                           "items": {"type": "string", "minLength": 1}},
+                               }}},
+        handler=lambda args, *, session_id="": discovery_tool(ctx, args, session_id=session_id),
+    )
     ctx.register_cli_command("pins", "★ Pick, resume, or manage pinned Hermes chats", setup_cli, cli)

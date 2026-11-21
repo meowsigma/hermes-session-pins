@@ -1,6 +1,8 @@
 name: session-pins
-version: 0.3.0
+version: 0.4.0
 description: "★ Pin important chats and find them in a local terminal picker."
 author: meowsigma
 kind: standalone
 requires_hermes: ">=0.22.5"
+provides_tools:
+  - session_pins_manage

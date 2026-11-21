@@ -1,4 +1,4 @@
-"""Render the real standalone picker with deterministic dimensions and fixture data."""
+"""Drive the real standalone picker with deterministic dimensions and fixture data."""
 from contextlib import contextmanager
 import os
 from pathlib import Path
@@ -7,6 +7,7 @@ import time
 import unittest
 from unittest.mock import patch
 
+from hermes_state import SessionDB
 from prompt_toolkit import Application
 from prompt_toolkit.data_structures import Size
 from prompt_toolkit.input import create_pipe_input
@@ -23,7 +24,7 @@ class Terminal(DummyOutput):
         return self.size
 
 
-def render_picker(rows, *, steps=("\r",), width=90, height=24):
+def render_picker(rows, *, steps=("\r",), width=90, height=24, before_first_key=None):
     """Capture frames before delivering each real key sequence to prompt_toolkit."""
     frames = []
     init = Application.__init__
@@ -36,6 +37,8 @@ def render_picker(rows, *, steps=("\r",), width=90, height=24):
                 lines = [tuple(screen.data_buffer[y][x] for x in range(width))
                          for y in range(screen.height)]
                 frames.append((lines, kwargs["style"]))
+                if len(frames) == 1 and before_first_key is not None:
+                    before_first_key()
                 pipe.send_text(steps[len(frames) - 1])
 
             init(app, *args, **kwargs, after_render=after_render)
@@ -134,3 +137,55 @@ class PickerStyleTests(unittest.TestCase):
         self.assertIn("Search: needle", text)
         self.assertIn("0 msgs", text)
         self.assertNotIn("\x1b", text)
+
+
+class PickerPinKeyTests(unittest.TestCase):
+    def test_stock_ctrl_p_refuses_without_writing_and_enter_still_selects(self):
+        with profile() as home:
+            path = home / "state.db"
+            with SessionDB(db_path=path) as db:
+                db.create_session("target", source="cli")
+                db.append_message("target", "user", "Synthetic picker test")
+            rows = pins.session_rows(recent=True, home=home)
+            self.assertEqual(["target"], [row["id"] for row in rows])
+            with patch.object(SessionDB, "set_projected_session_pinned", None, create=True):
+                picked, frames = render_picker(rows, steps=("\x10", "\r"))
+            self.assertIs(rows[0], picked)
+            self.assertIn("safe session selection support", "\n".join(map(line_text, frames[-1][0])))
+            with SessionDB(db_path=path, read_only=True) as fresh:
+                row = fresh.get_session("target")
+                self.assertFalse(row["pinned"])
+                self.assertFalse(row["hidden"])
+
+    @unittest.skipUnless(callable(getattr(SessionDB, "set_projected_session_pinned", None)),
+                         "needs the native projected pin writer")
+    def test_ctrl_p_refuses_a_tip_hidden_or_superseded_after_display(self):
+        for change in ("hide", "supersede"):
+            with self.subTest(change=change), profile() as home:
+                path = home / "state.db"
+                with SessionDB(db_path=path) as db:
+                    db.create_session("root", source="cli")
+                    db.append_message("root", "user", "Synthetic picker test")
+                    db.end_session("root", "compression")
+                    db.create_session("tip", source="cli", parent_session_id="root")
+                    db.append_message("tip", "user", "Current compression tip")
+                    rows = pins.session_rows(recent=True, home=home)
+                    self.assertEqual(["tip"], [row["id"] for row in rows])
+
+                    def invalidate_selection():
+                        if change == "hide":
+                            self.assertTrue(db.set_session_hidden("tip", True))
+                        else:
+                            db.end_session("tip", "compression")
+                            db.create_session("replacement", source="cli", parent_session_id="tip")
+
+                    picked, frames = render_picker(rows, steps=("\x10", "\x04"),
+                                                   before_first_key=invalidate_selection)
+                self.assertIsNone(picked)
+                self.assertIn("missing or not visible", "\n".join(map(line_text, frames[-1][0])))
+                with SessionDB(db_path=path, read_only=True) as fresh:
+                    ids = ("root", "tip", "replacement") if change == "supersede" else ("root", "tip")
+                    for sid in ids:
+                        row = fresh.get_session(sid)
+                        self.assertFalse(row["pinned"], sid)
+                        self.assertEqual(change == "hide", bool(row["hidden"]), sid)

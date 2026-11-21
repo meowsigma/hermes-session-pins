@@ -287,49 +287,48 @@ class PinsTests(unittest.TestCase):
         self.assertEqual([], pins.session_rows(recent=True))
         self.assertIn("No pinned chats in this list", pins.command_pins(None, "list", platform="tui"))
 
-    def test_slash_picker_returns_resume_command_not_a_fake_switch(self):
+    def test_classic_slash_fallback_lists_resume_without_question_or_fake_switch(self):
         sid = self.chat()
         pins.set_pin(sid, True)
-        class Context:
-            def ask_choice(self, question, choices):
-                self.choices = choices
-                return sid
-        ctx = Context()
-        result = pins.command_pins(ctx, "", platform="tui")
-        self.assertIn("Run this in your current chat:", result)
+        before = self.db.get_session(sid)
+        ctx = Mock()
+        ctx.ask_choice.side_effect = AssertionError("Stock /pins must not prompt")
+        result = pins.command_pins(ctx, "", platform="cli")
+        self.assertIn("Native selector not available here", result)
         self.assertIn(f"/resume {sid}", result)
-        self.assertTrue(ctx.choices[0]["label"].startswith("★ "))
+        self.assertIn("★ Main project", result)
+        self.assertNotIn("Switched", result)
+        ctx.ask_choice.assert_not_called()
+        self.assertEqual(before, self.db.get_session(sid))
 
-    def test_slash_manager_unpins_and_cancel_is_noop(self):
+    def test_stock_bare_and_manage_fallbacks_do_not_prompt_or_mutate(self):
         sid = self.chat()
         pins.set_pin(sid, True)
-        class Context:
-            def __init__(self, answers):
-                self.answers = iter(answers)
-            def ask_choice(self, question, choices):
-                return next(self.answers)
-        self.assertIn("No chat selected", pins.command_pins(Context([None]), "", platform="tui"))
-        self.assertEqual(1, self.db.get_session(sid)["pinned"])
-        self.assertIn("Unpinned", pins.command_pins(Context([sid, "unpin"]), "manage", platform="tui"))
-        self.assertEqual(0, self.db.get_session(sid)["pinned"])
+        before = self.db.get_session(sid)
+        for mode in ("", "manage"):
+            with self.subTest(mode=mode):
+                ctx = Mock()
+                ctx.ask_choice.side_effect = AssertionError("Stock /pins must not prompt")
+                result = pins.command_pins(ctx, mode, platform="cli")
+                self.assertIn(f"/resume {sid}", result)
+                self.assertNotIn("Unpinned:", result)
+                ctx.ask_choice.assert_not_called()
+                self.assertEqual(before, self.db.get_session(sid))
 
-    def test_slash_manage_unpins_in_the_profile_that_supplied_the_choice(self):
+    def test_selected_exact_unpin_stays_in_captured_profile_after_home_change(self):
         sid = self.chat("shared-id", "Source profile chat")
         self.db.set_session_pinned(sid, True)
         other = self.other_profile_with_pin(sid)
-
-        def choose(question, choices):
-            if choices[0]["value"] == "resume":
-                os.environ["HERMES_HOME"] = str(other)
-                return "unpin"
-            self.assertEqual("★ Source profile chat", choices[0]["label"])
-            return choices[0]["value"]
-
-        result = pins.command_pins(Mock(ask_choice=choose), "manage", platform="tui")
+        # The legacy exact/home-bound helper preserves identity. The picker key
+        # tests separately cover whether the current selection permits a write.
+        selected_home = self.home
+        with patch.dict(os.environ, HERMES_HOME=str(other)):
+            result = pins.set_pin(sid, False, exact=True, home=selected_home)
         with SessionDB(db_path=other / "state.db", read_only=True) as db:
             actual = (bool(self.db.get_session(sid)["pinned"]), bool(db.get_session(sid)["pinned"]))
         self.assertEqual((False, True), actual)
-        self.assertIn("Unpinned: Source profile chat", result)
+        self.assertEqual(sid, result["id"])
+        self.assertEqual("Source profile chat", result["title"])
 
     def test_slash_list_and_handoff_refuse_nonprintable_ids(self):
         safe = self.chat()
@@ -344,30 +343,24 @@ class PinsTests(unittest.TestCase):
         self.assertNotIn("\t", listing)
         self.assertNotIn("/resume chat-spaced", listing)
 
-        def select_odd(question, choices):
-            if choices[0]["value"] == "resume":
-                return "resume"
-            item = next(choice for choice in choices if choice["value"] == odd)
-            self.assertEqual(ascii(odd), item["description"])
-            self.assertTrue(item["description"].isprintable())
-            return item["value"]
+        for surface in ("cli", "tui", "desktop"):
+            for mode in ("", "manage", "list"):
+                with self.subTest(surface=surface, mode=mode):
+                    ctx = Mock()
+                    ctx.ask_choice.side_effect = AssertionError("Stock /pins must not prompt")
+                    result = pins.command_pins(ctx, mode, platform=surface)
+                    self.assertIn("cannot be copied safely", result)
+                    self.assertNotIn("\t", result)
+                    self.assertNotIn("/resume chat-spaced", result)
+                    ctx.ask_choice.assert_not_called()
 
-        for mode in ("", "manage"):
-            with self.subTest(mode=mode):
-                ctx = Mock(ask_choice=select_odd)
-                result = pins.command_pins(ctx, mode, platform="tui")
-                self.assertIn("cannot be copied safely", result)
-                self.assertNotIn("\t", result)
-                self.assertNotIn("/resume chat-spaced", result)
-
-    def test_manage_uses_exact_selected_id_without_trimming(self):
+    def test_exact_selected_mutator_preserves_opaque_id_without_trimming(self):
         safe = self.chat("chat-spaced", "Ordinary ID")
         odd = self.chat("chat-spaced\t", "Unusual ID")
         for sid in (safe, odd):
             self.db.set_session_pinned(sid, True)
-        ctx = Mock()
-        ctx.ask_choice.side_effect = [odd, "unpin"]
-        self.assertIn("Unpinned: Unusual ID", pins.command_pins(ctx, "manage", platform="tui"))
+        selected = pins.set_pin(odd, False, exact=True, home=self.home)
+        self.assertEqual(odd, selected["id"])
         self.assertTrue(self.db.get_session(safe)["pinned"])
         self.assertFalse(self.db.get_session(odd)["pinned"])
 
@@ -395,18 +388,14 @@ class PinsTests(unittest.TestCase):
         self.assertTrue(self.db.get_session(longer)["pinned"])
         self.assertTrue(self.db.get_session(titled)["pinned"])
 
-    def test_stale_slash_manage_selection_never_unpins_a_longer_id(self):
+    def test_stale_exact_selection_never_unpins_a_longer_id(self):
         short = self.chat("gone", "Removed chat")
         longer = self.chat("gone-longer", "Surviving chat")
         for sid in (short, longer):
             self.db.set_session_pinned(sid, True)
-        def choose(question, choices):
-            if choices[0]["value"] == "resume":
-                return "unpin"
-            self.db.delete_session(short)
-            return short
-        result = pins.command_pins(Mock(ask_choice=choose), "manage", platform="tui")
-        self.assertIn("no longer exists", result)
+        self.db.delete_session(short)
+        with self.assertRaisesRegex(pins.PinsError, "no longer exists"):
+            pins.set_pin(short, False, exact=True, home=self.home)
         self.assertTrue(self.db.get_session(longer)["pinned"])
 
     def test_stale_keyboard_selection_never_unpins_a_longer_id(self):
@@ -442,14 +431,21 @@ class PinsTests(unittest.TestCase):
         self.assertIn("reinterpreted at startup", err.getvalue())
         self.assertEqual("", out.getvalue())
 
+    @unittest.skipUnless(callable(getattr(SessionDB, "set_projected_session_pinned", None)),
+                         "needs the native projected pin writer")
     def test_picker_keyboard_pin_toggle_persists(self):
-        sid = self.chat()
+        ordinary = self.chat("chat-main", "Ordinary ID")
+        sid = self.chat("chat-main\t", "Unusual ID")
         with create_pipe_input() as input:
-            input.send_text("\x10\r")  # Ctrl-P then Enter
+            input.send_text("unusual\x10\r")  # Filter, Ctrl-P, then Enter
             chosen = pins.picker(pins.session_rows(recent=True), input=input, output=DummyOutput())
         self.assertEqual(sid, chosen["id"])
-        self.assertEqual(1, self.db.get_session(sid)["pinned"])
+        with SessionDB(db_path=self.home / "state.db", read_only=True) as fresh:
+            self.assertTrue(fresh.get_session(sid)["pinned"])
+            self.assertFalse(fresh.get_session(ordinary)["pinned"])
 
+    @unittest.skipUnless(callable(getattr(SessionDB, "set_projected_session_pinned", None)),
+                         "needs the native projected pin writer")
     def test_cli_picker_keyboard_toggle_refreshes_and_hands_off_in_source_profile(self):
         sid = self.chat("shared-id", "Source profile chat")
         self.db.set_session_pinned(sid, True)
