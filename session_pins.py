@@ -87,6 +87,14 @@ def session_rows(*, recent: bool = False, home: Path | None = None) -> list[dict
     ))
 
 
+def resume_argv(sid: str, home: Path) -> list[str]:
+    """Keep exact opaque IDs and the selected profile on both launch paths."""
+    resume = [f"--resume={sid}"] if sid.startswith("-") else ["--resume", sid]
+    # Root homes need an explicit default to override a sticky active_profile.
+    profile = [] if home.parent.name == "profiles" else ["--profile", "default"]
+    return ["chat", *resume, *profile]
+
+
 def resume_command(sid: str, *, home: Path | None = None) -> str:
     # Shell quoting is not terminal escaping. Never rewrite the ID to make it fit.
     id_error = "Resume command unavailable: this session ID cannot be copied safely."
@@ -104,11 +112,7 @@ def resume_command(sid: str, *, home: Path | None = None) -> str:
     # Hermes expands variables and trims HERMES_HOME again on startup.
     if not path.isprintable() or "$" in path or path != path.strip():
         raise PinsError("Resume command unavailable: this Hermes home cannot be copied safely.")
-    resume = [f"--resume={sid}"] if sid.startswith("-") else ["--resume", sid]
-    # A profile-shaped HERMES_HOME pins a named profile directly. For a root home,
-    # explicitly select default so a sticky active_profile cannot redirect startup.
-    profile = [] if home.parent.name == "profiles" else ["--profile", "default"]
-    return shlex.join(["env", f"HERMES_HOME={path}", "hermes", "chat", *resume, *profile])
+    return shlex.join(["env", f"HERMES_HOME={path}", "hermes", *resume_argv(sid, home)])
 
 
 def resume_line(sid: str, *, home: Path | None = None) -> str:
@@ -343,8 +347,9 @@ def cli(args):
         executable = shutil.which("hermes")
         if not executable:
             raise PinsError("Cannot find the Hermes executable in PATH.")
-        # No shell; the active HERMES_HOME stays intact for named/custom profiles.
-        return subprocess.call([executable, "chat", "--resume", selected["id"]])
+        # No shell, no option-shaped ID injection, and no sticky-profile redirect.
+        return subprocess.call([executable, *resume_argv(selected["id"], home)],
+                               env=dict(os.environ, HERMES_HOME=str(home)))
     except (PinsError, OSError, RuntimeError, ValueError, sqlite3.Error, EOFError) as exc:
         print(f"Session Pins: {exc}", file=sys.stderr)
         return 1

@@ -115,10 +115,10 @@ def session_row(*, width: int, number: int, selected: bool, sid: str, age: str,
     # title in narrow panes. The number and pin stay visible.
     if width >= 64:
         widths = (11, 11, 18)
-    elif width >= 40:
+    elif width >= 52:
         widths = (11, 10, 8)
     else:
-        widths = (10 if width >= 24 else 0, 0, 0)
+        widths = (10 if width >= 32 else 0, 0, 0)
     messages = count if type(count) is int and count >= 0 else 0
     base = "class:selected" if selected else "class:muted"
     emphasis = base + " class:strong" if selected else base

@@ -22,7 +22,7 @@ class CLIIntegrationTests(unittest.TestCase):
         source = Path(__file__).resolve().parents[1]
         target = cls.home / "plugins" / "session-pins"
         target.mkdir(parents=True)
-        for filename in ("plugin.yaml", "__init__.py", "session_pins.py"):
+        for filename in ("plugin.yaml", "__init__.py", "session_pins.py", "picker_style.py"):
             shutil.copy2(source / filename, target / filename)
         enabled = subprocess.run([cls.hermes, "plugins", "enable", "session-pins"], env=cls.env, capture_output=True, text=True, timeout=35)
         if enabled.returncode:
@@ -90,8 +90,10 @@ class CLIIntegrationTests(unittest.TestCase):
             self.assertIn("★ Important project", text)
             self.assertIn("hermes chat --resume important-old", text)
             self.assertLess(text.index("Important project"), text.index("Ordinary recent chat"))
-            self.assertIn("\x1b[0;1;7m", text)  # Bold reverse selected row, real ANSI output.
-            print("\nReal CLI/PTY: starred pin first; bold/reverse selection; Enter returned exact resume command.")
+            self.assertIn("Sessions", text)
+            self.assertIn("resumable", text)
+            self.assertRegex(text, r"\x1b\[[0-9;]*48;[25];[0-9;]*m")  # Real selection-background ANSI.
+            print("\nReal CLI/PTY: starred pin first; native-style selection chip; Enter returned exact resume command.")
         finally:
             os.close(master)
             if process.poll() is None:

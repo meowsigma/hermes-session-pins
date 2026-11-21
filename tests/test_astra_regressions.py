@@ -21,7 +21,7 @@ class ShellHandoffTests(unittest.TestCase):
             target = work / "plugins" / "session-pins"
             target.mkdir(parents=True)
             source = Path(__file__).resolve().parents[1]
-            for name in ("plugin.yaml", "__init__.py", "session_pins.py"):
+            for name in ("plugin.yaml", "__init__.py", "session_pins.py", "picker_style.py"):
                 shutil.copy2(source / name, target / name)
             sid = "shared chat's ID"
             for home, title in ((default, "Default chat"), (work, "Work chat")):

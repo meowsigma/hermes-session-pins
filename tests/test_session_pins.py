@@ -231,22 +231,17 @@ class PinsTests(unittest.TestCase):
         self.chat("pinned", "Pinned chat")
         self.chat("ordinary", "Ordinary chat")
         pins.set_pin("pinned", True)
-        seen = {}
-        from prompt_toolkit import Application
-        real_init = Application.__init__
-        def observe(app, *args, **kwargs):
-            seen["style"] = dict(kwargs["style"].style_rules)
-            controls = list(kwargs["layout"].find_all_controls())
-            texts = [c.text() if callable(getattr(c, "text", None)) else getattr(c, "text", "") for c in controls]
-            seen["text"] = str(texts)
-            return real_init(app, *args, **kwargs)
-        with create_pipe_input() as input, patch.object(Application, "__init__", observe):
-            input.send_text("\r")
-            chosen = pins.picker(pins.session_rows(recent=True), input=input, output=DummyOutput())
+        from tests.test_picker_style import line_text, profile, render_picker
+        rows = pins.session_rows(recent=True)
+        with profile():
+            chosen, frames = render_picker(rows)
         self.assertEqual("pinned", chosen["id"])
-        self.assertIn("★ Pinned chat", seen["text"])
-        self.assertEqual("ansiyellow bold", seen["style"]["pinned"])
-        self.assertEqual("reverse bold", seen["style"]["selected"])
+        lines, style = frames[0]
+        self.assertIn("★ Pinned chat", "\n".join(line_text(line) for line in lines))
+        chip = style.get_attrs_for_style_str("class:selected")
+        self.assertTrue(chip.bgcolor)
+        self.assertFalse(chip.reverse)
+        self.assertTrue(style.get_attrs_for_style_str("class:pin").bold)
 
     def test_cli_resume_handoff_no_shell_and_same_profile(self):
         sid = self.chat()
@@ -255,7 +250,10 @@ class PinsTests(unittest.TestCase):
             stdin.isatty.return_value = stdout.isatty.return_value = True
             with patch.object(pins, "picker", return_value={"id": sid}), patch.object(pins.shutil, "which", return_value="/usr/bin/hermes"), patch.object(pins.subprocess, "call", return_value=0) as call:
                 self.assertEqual(0, pins.cli(args))
-                call.assert_called_once_with(["/usr/bin/hermes", "chat", "--resume", sid])
+                call.assert_called_once_with(
+                    ["/usr/bin/hermes", "chat", "--resume", sid, "--profile", "default"],
+                    env=dict(os.environ, HERMES_HOME=str(self.home)),
+                )
                 self.assertEqual(str(self.home), os.environ["HERMES_HOME"])
 
     @unittest.skipUnless(os.name == "posix", "printed commands use POSIX shell syntax")

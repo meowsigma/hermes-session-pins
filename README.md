@@ -39,8 +39,16 @@ separate shell—not as a command in your active chat:
 hermes pins
 ```
 
-Pinned chats stay at the top, with **yellow bold ★ labels**, followed by up to 40
-recent chats. Pins eligible under Hermes's native visibility filters are loaded
+The compact, borderless **Sessions** list follows the native resume picker's
+visual language: session counts, numbered ID/age/message-count/title columns,
+a ▸ cursor, and a filled selection highlight. Pinned chats stay at the top with
+**bold ★ labels**, followed by up to 40 recent chats. Custom profile skin colors
+are read when available; otherwise it uses Hermes's stock light/dark tones.
+Non-default built-in skins without a profile YAML use the stock fallback. This
+is a separate prompt-toolkit picker, not the native Ink component. On narrow
+terminals, metadata columns collapse to leave room for chat titles.
+
+Pins eligible under Hermes's native visibility filters are loaded
 even when they are older than that recent page. A chat that Hermes excludes,
 such as the canonical hidden Bot Chat, can stay pinned without appearing here.
 Type to filter by title/ID, use **↑/↓**, **Enter** to launch the selected chat, or
@@ -73,7 +81,8 @@ Slash commands are limited to local terminal/Desktop surfaces; messaging chats
 cannot enumerate or modify your local pins through this plugin. No secrets or
 session contents are sent anywhere. Display text removes or escapes control
 characters. If a session ID cannot be copied safely, no resume command is
-printed for it; the stored ID is not changed.
+printed for it; the stored ID is not changed. Direct launching uses an exact
+argument vector, without a shell, and preserves the selected home/profile.
 
 ## Remove
 
