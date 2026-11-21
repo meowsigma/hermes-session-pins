@@ -3,7 +3,31 @@
 Keep important Hermes chats easy to find without deleting your worker chats.
 A small Python plugin: no model calls, external network requests, or extra packages.
 
-## Install
+## v0.4 preview — patched Hermes only
+
+This branch provides the optional native Ink selector. It needs the separate
+session-widget core hook described below; installing the Python plugin alone
+does not add that hook. **Stock users should stay on [main](https://github.com/meowsigma/hermes-session-pins/tree/main)
+and stable v0.3.0.** The preview does not replace the stable release.
+
+Install the pinned, reviewed implementation:
+
+```sh
+hermes plugins install meowsigma/hermes-session-pins --ref 2dbf6851b96eb4b896c30701d22c386baa16911c --enable
+```
+
+Release documentation may have a later commit with identical runtime files.
+The [v0.4.0 preview release](https://github.com/meowsigma/hermes-session-pins/releases/tag/v0.4.0)
+also gives the exact tag-commit install command, the separately reviewed core
+patch, and its SHA-256. Do not apply the patch to an unrelated Hermes revision:
+its base is `bf0203a794a07aac3ff764972ab9087baa4e4f4e`. This plugin never applies
+or activates a core patch itself.
+
+On that patched Hermes build, copy `tui/pins.mjs` from the installed plugin into
+the **same profile's** `tui-widgets/pins.mjs`. The TUI loads that companion; the
+plugin installer does not copy it. No clarification prompt is used.
+
+## Stock install (stable v0.3.0)
 
 ```sh
 hermes plugins install meowsigma/hermes-session-pins --enable
@@ -59,7 +83,7 @@ that API, these selected changes fail closed with an explanation; metadata
 search, plain listings, the shell picker's Enter handoff, and explicit typed
 `/pin` or `/unpin` still work. The proposed core patch also owns selector
 revocation and exact eligible native attachment.
-This unreleased candidate does not install or activate that separate core patch.
+The preview does not install or activate that separate core patch.
 
 For a highlighted picker that **does resume your selection**, run this from a
 separate shell—not as a command in your active chat:

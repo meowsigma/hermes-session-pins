@@ -2,6 +2,8 @@
 
 ## 0.4.0
 
+Published as a preview on `release/v0.4.0`; stable `main` stays at v0.3.0.
+
 - Search visible chats by title words or ID beyond the recent list, with truthful
   pages and counts, recorded model, last activity, and confirmed fork labels.
 - Add a local agent tool for discovery and exact-ID bulk pin/unpin.
@@ -9,6 +11,12 @@
   pin/unpin, and native session switching. It requires the separate Hermes
   session-widget hook; stock Ink and Desktop use plain output without asking a
   question. Classic CLI still provides its original prompt and resume handoff.
+- Compatibility: the safe selected-write core API is now required for Ctrl-P
+  pin/unpin in the shell picker as well as the Ink overlay. On stock builds
+  without it, selected changes are refused; explicit typed `/pin` and `/unpin`
+  still work. Installing this preview does not install the core hook or the
+  optional Ink companion. Use the preview release's pinned install command;
+  ordinary updates from stable `main` intentionally stay on v0.3.0.
 
 ## 0.3.0
 
