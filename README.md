@@ -22,8 +22,8 @@ catalog, reopen that client. No background-service restart is required by this p
 | `/unpin` | Unpin the current chat. |
 | `/pin <session-id>` | Pin another chat by full ID or unambiguous prefix. |
 | `/unpin <session-id>` | Unpin that chat. |
-| `/pins` | Choose a starred pin and get its exact `/resume` command. |
-| `/pins list` | List pins and their `/resume` commands. |
+| `/pins` | Choose a visible starred pin and get its `/resume` command, if it can be copied safely. |
+| `/pins list` | List visible pins and their available `/resume` commands. |
 | `/pins manage` | Choose a pin, then show its resume command or unpin it. |
 
 **Important: this does not change the built-in `/resume` picker.** Hermes reserves
@@ -40,18 +40,25 @@ hermes pins
 ```
 
 Pinned chats stay at the top, with **yellow bold ★ labels**, followed by up to 40
-recent chats. Every pin is loaded even when it is older than that recent page.
+recent chats. Pins eligible under Hermes's native visibility filters are loaded
+even when they are older than that recent page. A chat that Hermes excludes,
+such as the canonical hidden Bot Chat, can stay pinned without appearing here.
 Type to filter by title/ID, use **↑/↓**, **Enter** to launch the selected chat, or
 **Ctrl-P** to pin/unpin the selection. **Esc** closes it. It launches the normal
 Hermes chat client; it does not replace another already-open terminal's session.
 
 ```sh
-hermes pins list             # Plain list of all pins
+hermes pins list             # Plain list of visible pins
 hermes pins pin SESSION_ID  # Pin from the shell
 hermes pins unpin SESSION_ID
 hermes pins --print          # Pick, then print the shell resume command only
 hermes -p work pins          # Use the work profile's sessions
 ```
+
+Shell commands printed by `list` or `--print` are for POSIX shells and carry the
+selected Hermes home, so you can paste them back into your original shell after
+using `hermes -p work pins`. In-chat `/resume` commands use the current chat's
+profile.
 
 ## Storage and privacy
 
@@ -64,7 +71,9 @@ contents. Compression-lineage handling stays with Hermes itself.
 
 Slash commands are limited to local terminal/Desktop surfaces; messaging chats
 cannot enumerate or modify your local pins through this plugin. No secrets or
-session contents are sent anywhere. Display labels strip control characters.
+session contents are sent anywhere. Display text removes or escapes control
+characters. If a session ID cannot be copied safely, no resume command is
+printed for it; the stored ID is not changed.
 
 ## Remove
 

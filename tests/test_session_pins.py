@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 import io
 import os
 from pathlib import Path
+import shlex
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from hermes_state import SessionDB
 from prompt_toolkit.input import create_pipe_input
@@ -124,6 +125,20 @@ class PinsTests(unittest.TestCase):
         pins.set_pin(sid, True)
         self.assertEqual([sid], [r["id"] for r in pins.session_rows()])
 
+    def test_hidden_bot_chat_stays_hidden_after_successful_pin(self):
+        sid = self.chat("hidden-bot", self.db.CANONICAL_BOT_CHAT_TITLE)
+        self.db.set_session_hidden(sid, True)
+        result = pins.command_pin(sid, platform="tui")
+        self.assertIn("★ Pinned", result)
+        self.assertIn("still marked hidden", result)
+        self.assertNotIn("Find it with", result)
+        row = self.db.get_session(sid)
+        self.assertTrue(row["pinned"])
+        self.assertTrue(row["hidden"])
+        self.assertEqual([], pins.session_rows())
+        self.assertEqual([], pins.session_rows(recent=True))
+        self.assertIn("No pinned chats in this list", pins.command_pins(None, "list", platform="tui"))
+
     def test_slash_picker_returns_resume_command_not_a_fake_switch(self):
         sid = self.chat()
         pins.set_pin(sid, True)
@@ -149,6 +164,46 @@ class PinsTests(unittest.TestCase):
         self.assertEqual(1, self.db.get_session(sid)["pinned"])
         self.assertIn("Unpinned", pins.command_pins(Context([sid, "unpin"]), "manage", platform="tui"))
         self.assertEqual(0, self.db.get_session(sid)["pinned"])
+
+    def test_slash_list_and_handoff_refuse_nonprintable_ids(self):
+        safe = self.chat()
+        odd = self.chat("chat-spaced\t", "Unusual ID")
+        for sid in (safe, odd):
+            self.db.set_session_pinned(sid, True)
+
+        listing = pins.command_pins(None, "list", platform="tui")
+        self.assertIn(f"/resume {safe}", listing)
+        self.assertIn("Unusual ID", listing)
+        self.assertIn("cannot be copied safely", listing)
+        self.assertNotIn("\t", listing)
+        self.assertNotIn("/resume chat-spaced", listing)
+
+        def select_odd(question, choices):
+            if choices[0]["value"] == "resume":
+                return "resume"
+            item = next(choice for choice in choices if choice["value"] == odd)
+            self.assertEqual(ascii(odd), item["description"])
+            self.assertTrue(item["description"].isprintable())
+            return item["value"]
+
+        for mode in ("", "manage"):
+            with self.subTest(mode=mode):
+                ctx = Mock(ask_choice=select_odd)
+                result = pins.command_pins(ctx, mode, platform="tui")
+                self.assertIn("cannot be copied safely", result)
+                self.assertNotIn("\t", result)
+                self.assertNotIn("/resume chat-spaced", result)
+
+    def test_manage_uses_exact_selected_id_without_trimming(self):
+        safe = self.chat("chat-spaced", "Ordinary ID")
+        odd = self.chat("chat-spaced\t", "Unusual ID")
+        for sid in (safe, odd):
+            self.db.set_session_pinned(sid, True)
+        ctx = Mock()
+        ctx.ask_choice.side_effect = [odd, "unpin"]
+        self.assertIn("Unpinned: Unusual ID", pins.command_pins(ctx, "manage", platform="tui"))
+        self.assertTrue(self.db.get_session(safe)["pinned"])
+        self.assertFalse(self.db.get_session(odd)["pinned"])
 
     def test_picker_real_keyboard_enter_search_and_cancel(self):
         self.chat("first-chat", "First")
@@ -203,14 +258,47 @@ class PinsTests(unittest.TestCase):
                 call.assert_called_once_with(["/usr/bin/hermes", "chat", "--resume", sid])
                 self.assertEqual(str(self.home), os.environ["HERMES_HOME"])
 
+    @unittest.skipUnless(os.name == "posix", "printed commands use POSIX shell syntax")
     def test_cli_list_plain_output(self):
         sid = self.chat()
         pins.set_pin(sid, True)
         out = io.StringIO()
+        with redirect_stdout(out), patch.dict(os.environ, {"COLUMNS": "30"}):
+            self.assertEqual(0, pins.cli(argparse.Namespace(action="list", session_id=None, print_only=False)))
+        title, command = out.getvalue().splitlines()
+        self.assertEqual("★ Main project", title)
+        self.assertEqual([
+            "env", f"HERMES_HOME={self.home}", "hermes", "chat", "--resume", sid,
+            "--profile", "default",
+        ], shlex.split(command))
+
+    def test_cli_list_and_print_refuse_nonprintable_ids(self):
+        safe = self.chat()
+        odd = self.chat("odd\u2028id", "Unusual ID")
+        for sid in (safe, odd):
+            self.db.set_session_pinned(sid, True)
+
+        out = io.StringIO()
         with redirect_stdout(out):
             self.assertEqual(0, pins.cli(argparse.Namespace(action="list", session_id=None, print_only=False)))
-        self.assertIn("★ Main project", out.getvalue())
-        self.assertIn(f"hermes chat --resume {sid}", out.getvalue())
+        listing = out.getvalue()
+        self.assertIn("Unusual ID", listing)
+        self.assertIn("cannot be copied safely", listing)
+        if os.name == "posix":
+            self.assertIn(f"--resume {safe}", listing)
+        self.assertNotIn("\u2028", listing)
+        self.assertNotIn("--resume odd", listing)
+
+        args = argparse.Namespace(action="pick", session_id=None, print_only=True)
+        out, err = io.StringIO(), io.StringIO()
+        with (redirect_stdout(out), redirect_stderr(err), patch.object(out, "isatty", return_value=True),
+              patch.object(pins.sys, "stdin") as stdin,
+              patch.object(pins, "picker", return_value={"id": odd})):
+            stdin.isatty.return_value = True
+            self.assertEqual(1, pins.cli(args))
+        self.assertEqual("", out.getvalue())
+        self.assertIn("cannot be copied safely", err.getvalue())
+        self.assertNotIn("\u2028", err.getvalue())
 
     def test_labels_strip_control_characters(self):
         self.assertNotIn("\x1b", pins.clean_label("\x1b[31mred\nline\x07"))

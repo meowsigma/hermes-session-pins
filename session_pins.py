@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
+import os
 import re
 import shlex
 import shutil
@@ -32,10 +33,14 @@ def title(row: dict) -> str:
     return clean_label(row.get("title") or row.get("preview")) or "Untitled chat"
 
 
+def display_id(sid: str) -> str:
+    return sid if sid.isprintable() else ascii(sid)
+
+
 @contextmanager
-def database(*, writable: bool = False):
+def database(*, writable: bool = False, home: Path | None = None):
     # Resolve per call: one process can serve several Hermes profiles.
-    path = Path(get_hermes_home()) / "state.db"
+    path = (Path(get_hermes_home()) if home is None else home) / "state.db"
     if not path.is_file():
         raise PinsError("No sessions yet. Send a message in Hermes, then use /pin.")
     with SessionDB(db_path=path, read_only=not writable) as db:
@@ -45,7 +50,7 @@ def database(*, writable: bool = False):
 
 
 def resolve(db, value: str) -> dict:
-    sid = db.resolve_session_id(value.strip())
+    sid = db.resolve_session_id(value)
     if not sid:
         raise PinsError("Session not found, or that ID prefix is ambiguous. Use the full session ID.")
     row = db.get_session(sid)
@@ -55,7 +60,7 @@ def resolve(db, value: str) -> dict:
 
 
 def set_pin(value: str, pinned: bool) -> dict:
-    if not value.strip():
+    if not value:
         raise PinsError("No current session yet. Send a message first, or provide a session ID.")
     with database(writable=True) as db:
         row = resolve(db, value)
@@ -67,10 +72,10 @@ def set_pin(value: str, pinned: bool) -> dict:
         return updated
 
 
-def session_rows(*, recent: bool = False) -> list[dict]:
-    with database() as db:
-        # Back-fill ALL durable pins before any UI paging; old pins must not disappear
-        # behind thousands of recent worker sessions. Core projects compression tips.
+def session_rows(*, recent: bool = False, home: Path | None = None) -> list[dict]:
+    with database(home=home) as db:
+        # Back-fill pins eligible under native visibility filters before UI paging.
+        # Core projects compression tips.
         rows = db.list_sessions_rich(
             limit=40 if recent else 1, include_pinned=True, order_by_last_active=True,
         )
@@ -82,8 +87,35 @@ def session_rows(*, recent: bool = False) -> list[dict]:
     ))
 
 
-def resume_command(sid: str, *, terminal: bool = False) -> str:
-    return shlex.join(["hermes", "chat", "--resume", sid]) if terminal else f"/resume {sid}"
+def resume_command(sid: str, *, home: Path | None = None) -> str:
+    # Shell quoting is not terminal escaping. Never rewrite the ID to make it fit.
+    id_error = "Resume command unavailable: this session ID cannot be copied safely."
+    if not sid.isprintable() or sid != sid.strip():
+        raise PinsError(id_error)
+    if home is None:
+        # The classic /resume parser treats these as a menu index or unwraps them.
+        if sid.isdigit() or (len(sid) >= 2 and sid[0] + sid[-1] in {"<>", "[]", '""', "''"}):
+            raise PinsError(id_error)
+        return f"/resume {sid}"
+
+    if os.name != "posix":
+        raise PinsError("Printed shell resume commands require a POSIX shell. Launch it from the picker instead.")
+    path = str(home)
+    # Hermes expands variables and trims HERMES_HOME again on startup.
+    if not path.isprintable() or "$" in path or path != path.strip():
+        raise PinsError("Resume command unavailable: this Hermes home cannot be copied safely.")
+    resume = [f"--resume={sid}"] if sid.startswith("-") else ["--resume", sid]
+    # A profile-shaped HERMES_HOME pins a named profile directly. For a root home,
+    # explicitly select default so a sticky active_profile cannot redirect startup.
+    profile = [] if home.parent.name == "profiles" else ["--profile", "default"]
+    return shlex.join(["env", f"HERMES_HOME={path}", "hermes", "chat", *resume, *profile])
+
+
+def resume_line(sid: str, *, home: Path | None = None) -> str:
+    try:
+        return resume_command(sid, home=home)
+    except PinsError as exc:
+        return str(exc)
 
 
 def require_local(platform: str) -> None:
@@ -99,7 +131,9 @@ def command_pin(raw_args: str, *, session_id: str = "", platform: str = "", pinn
         value = raw_args.strip() or session_id
         row = set_pin(value, pinned)
         if pinned:
-            return f"{STAR} Pinned: {title(row)}\nFind it with /pins or the terminal picker: hermes pins"
+            hint = ("This chat is still marked hidden; Hermes may omit it from pin lists."
+                    if row.get("hidden") else "Browse visible pins with /pins or hermes pins.")
+            return f"{STAR} Pinned: {title(row)}\n{hint}"
         return f"Unpinned: {title(row)}"
     except (PinsError, OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
         return f"Session Pins: {exc}"
@@ -113,12 +147,11 @@ def command_pins(ctx, raw_args: str, *, platform: str = "") -> str:
             return "Usage: /pins [list|manage]. Pin this chat with /pin; remove its pin with /unpin."
         rows = session_rows()
         if not rows:
-            return "No pinned chats. Use /pin in a chat you want to keep."
-        listing = "\n".join(f"{STAR} {title(row)}\n  {resume_command(row['id'])}" for row in rows)
+            return "No pinned chats in this list. Use /pin in a chat you want to keep."
         if mode == "list":
-            return listing
+            return "\n".join(f"{STAR} {title(row)}\n  {resume_line(row['id'])}" for row in rows)
         picked = ctx.ask_choice("Pinned chats — choose a chat", [
-            {"value": row["id"], "label": f"{STAR} {title(row)}", "description": row["id"]}
+            {"value": row["id"], "label": f"{STAR} {title(row)}", "description": display_id(row["id"])}
             for row in rows
         ])
         if not picked:
@@ -246,15 +279,17 @@ def cli(args):
             return 0
         if args.session_id:
             raise PinsError("A session ID is accepted only with pin or unpin.")
-        rows = session_rows(recent=args.action == "pick")
+        home = Path(get_hermes_home()).absolute()
+        rows = session_rows(recent=args.action == "pick", home=home)
         if args.action == "list":
             from rich.console import Console
             console = Console()
             for row in rows:
                 console.print(f"{STAR} {title(row)}", style="bold yellow", markup=False, highlight=False)
-                console.print(resume_command(row["id"], terminal=True), markup=False, highlight=False)
+                # Keep the copyable line literal: no Rich wrapping or emoji replacement.
+                print(resume_line(row["id"], home=home))
             if not rows:
-                console.print("No pinned chats. Use /pin in Hermes.")
+                console.print("No pinned chats in this list. Use /pin in Hermes.")
             return 0
         if not rows:
             print("No chats yet. Send a message in Hermes first.")
@@ -265,7 +300,7 @@ def cli(args):
         if selected is None:
             return 0
         if args.print_only:
-            print(resume_command(selected["id"], terminal=True))
+            print(resume_command(selected["id"], home=home))
             return 0
         executable = shutil.which("hermes")
         if not executable:
