@@ -54,6 +54,35 @@ test('public SDK key signature, filtering, backspace and cancellation', () => {
   assert.equal(a.reduce(typed, input({ ctrl: true }, 'u')).query, '');
   assert.equal(a.reduce({ ...base, query: 'a😀' }, input({ backspace: true })).query, 'a');
 });
+test('Left/Right choose Pinned/All while Tab still toggles, preserving search', () => {
+  const a = app();
+  for (const loading of [false, true]) {
+    const state = { ...base, all: true, index: 1, query: 'project', error: 'previous error', loading };
+    const pinned = a.reduce(state, input({ leftArrow: true }));
+    assert.equal(pinned.all, false);
+    assert.equal(pinned.index, 0);
+    assert.equal(pinned.query, state.query);
+    assert.equal(pinned.error, '');
+    assert.equal(pinned.loading, loading);
+    assert.equal(pinned.rows, state.rows);
+    assert.equal(pinned.home, state.home);
+    assert.equal(pinned.token, state.token);
+    assert.equal(a.reduce(pinned, input({ leftArrow: true })).all, false);
+    const all = a.reduce({ ...pinned, index: 1, error: 'another error' }, input({ rightArrow: true }));
+    assert.equal(all.all, true);
+    assert.equal(all.index, 0);
+    assert.equal(all.query, state.query);
+    assert.equal(all.error, '');
+    assert.equal(all.loading, loading);
+    assert.equal(all.rows, state.rows);
+    assert.equal(all.home, state.home);
+    assert.equal(all.token, state.token);
+    assert.equal(a.reduce(all, input({ rightArrow: true })).all, true);
+    assert.equal(a.reduce(all, input({ tab: true })).all, false);
+    assert.equal(a.reduce(pinned, input({ tab: true })).all, true);
+  }
+});
+
 test('unique instance tokens and safe metadata rendering', () => {
   const a = app();
   assert.notEqual(a.init('').token, a.init('').token);

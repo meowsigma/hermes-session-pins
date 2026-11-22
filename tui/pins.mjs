@@ -170,7 +170,7 @@ export default function register(sdk) {
       h(Box, { gap: 3, marginTop: compact ? 0 : 1 },
         text(`Pinned ${pinCount}`, { bold: !state.all, color: !state.all ? t.color.primary : t.color.muted }),
         text(`All chats ${state.rows.length}`, { bold: state.all, color: state.all ? t.color.primary : t.color.muted }),
-        text('Tab switch')),
+        text('Tab / ←→ switch')),
       h(Box, { marginTop: compact ? 0 : 1 }, text(`Search: ${state.query || 'type a title or ID…'}`, { color: state.query ? t.color.label : t.color.muted })),
       state.loading ? h(ShimmerRows, { rows: Math.min(3, room), width: Math.max(1, inner), t }) : h(Box, { flexDirection: 'column', marginTop: compact ? 0 : 1 },
         text(`${filtered.length} matching ${state.all ? 'chats' : 'pins'}${filtered.length ? ` · ${index + 1}/${filtered.length}` : ''}${start ? ` · ↑ ${start} above` : ''}`),
@@ -205,7 +205,9 @@ export default function register(sdk) {
       if (!validHome || state.home !== home) return { ...state, rows: [], index: 0, loading: false, error: 'This profile home cannot round-trip safely. Close and reopen the picker.' };
       if (state.busy) return state;
       if (sdk.isCtrl(key, ch, 'r')) { load(state, true); return { ...state, rows: [], index: 0, loading: true, error: '' }; }
-      if (key.tab) return { ...state, all: !state.all, index: 0, error: '' };
+      if (key.tab || key.leftArrow || key.rightArrow) return {
+        ...state, all: key.leftArrow ? false : key.rightArrow ? true : !state.all, index: 0, error: '',
+      };
       if (sdk.isCtrl(key, ch, 'u')) return { ...state, query: '', index: 0, error: '' };
       if (key.backspace || key.delete) return { ...state, query: Array.from(state.query).slice(0, -1).join(''), index: 0, error: '' };
       if (key.upArrow) return { ...state, index: Math.max(0, state.index - 1) };
