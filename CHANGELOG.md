@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.0
+
+- Reopen an unchanged in-chat picker without launching a new inventory process:
+  keep metadata in profile-local memory for at most 30 seconds, invalidated by
+  SQLite database/WAL fingerprint changes, expiry or widget reload.
+- Ctrl+R always reads fresh inventory. Cache misses clear old rows and disable
+  selection while loading; refresh failures never restore stale rows.
+- No disk cache, transcript previews, core patches or new dependencies.
+- This improves warm reopening only, not first-open or forced-refresh latency.
+  Enter still copies `/resume ID` for manual paste and confirmation; composer
+  autofill and same-view navigation await a public host API (issue #158663).
+- Independent Astra high exact-source review approved the loading changes;
+  all 18 Node tests passed. The previous 57-pass Python receipt applies to the
+  unchanged Python source/tests, not a new Python run. Synthetic native-CLI/SDK
+  measurements do not establish real Ink keyboard/rendering acceptance.
+
+Upgrade with `hermes plugins update session-pins`, then run
+`hermes pins install-ui` in each profile where you use the Ink picker.
+Modified widget files are preserved rather than silently overwritten.
+
 ## 0.3.9
 
 - Add an optional native `/pins` modal inside the existing Hermes Ink chat,

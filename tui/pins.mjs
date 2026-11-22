@@ -1,6 +1,8 @@
 // Session Pins native user widget — public SDK only; no Hermes core imports.
 import { execFile, execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { statSync } from 'node:fs';
+import { performance } from 'node:perf_hooks';
 import { homedir, platform } from 'node:os';
 import { resolve, dirname, basename, isAbsolute } from 'node:path';
 
@@ -32,6 +34,45 @@ export function age(stamp, now = Date.now()) {
   return `${Math.floor(seconds / 86400)}d ago`;
 }
 
+// Read metadata only. SQLite may commit to either the DB or its WAL; watching
+// just state.db would keep stale pin/visibility/title results in WAL mode.
+export function inventoryStamp(home) {
+  try {
+    const stamp = path => {
+      try {
+        const s = statSync(path, { bigint: true });
+        return [s.dev, s.ino, s.size, s.mtimeNs, s.ctimeNs].join(':');
+      } catch (error) {
+        if (error.code === 'ENOENT' && path.endsWith('-wal')) return 'absent';
+        throw error;
+      }
+    };
+    return `${stamp(resolve(home, 'state.db'))}/${stamp(resolve(home, 'state.db-wal'))}`;
+  } catch { return null; } // A failed check is a cache miss, never cached truth.
+}
+
+// One short-lived, profile-local entry, kept only in this widget registration.
+// No disk cache, transcript previews, timers, startup prefetch or extra process.
+export function inventoryCache(home, { now = () => performance.now(), stamp = inventoryStamp } = {}) {
+  let entry;
+  return {
+    clear() { entry = undefined; },
+    read() {
+      if (!entry) return null;
+      if (now() >= entry.expires || stamp(home) !== entry.stamp) {
+        entry = undefined;
+        return null;
+      }
+      return entry.rows.map(row => ({ ...row }));
+    },
+    store(rows, before) {
+      entry = undefined;
+      if (before === null || stamp(home) !== before) return;
+      entry = { rows: rows.map(row => ({ ...row })), stamp: before, expires: now() + 30_000 };
+    },
+  };
+}
+
 // Frozen at registration: an ambient/profile change can never redirect a list
 // or refresh. A response from a different home is rejected, not relabelled.
 export default function register(sdk) {
@@ -40,6 +81,7 @@ export default function register(sdk) {
   const validHome = isAbsolute(rawHome) && rawHome === rawHome.trim() && !rawHome.includes('$') && !rawHome.startsWith('~');
   const home = resolve(rawHome);
   const profile = basename(dirname(home)) === 'profiles' ? [] : ['--profile', 'default'];
+  const cache = inventoryCache(home);
 
   const children = new Map();
   const cancel = token => {
@@ -49,12 +91,22 @@ export default function register(sdk) {
   };
   const cancelAll = () => { for (const token of children.keys()) cancel(token); };
   const land = (token, fn) => sdk.updateWidget(app, state => state.token === token ? fn(state) : state);
-  function load(state) {
+  function load(state, force = false) {
     if (!validHome || state.home !== home) {
       land(state.token, s => ({ ...s, rows: [], index: 0, loading: false, error: 'This profile home cannot round-trip safely.' }));
       return;
     }
     cancel(state.token);
+    const cached = !force && cache.read();
+    if (cached) {
+      land(state.token, s => ({ ...s, rows: cached, loading: false, error: '' }));
+      return;
+    }
+    cache.clear();
+    // One cache decision owns both display validity and subprocess admission.
+    // Never leave rows actionable after this load has rejected their cache.
+    land(state.token, s => ({ ...s, rows: [], index: 0, loading: true, error: '' }));
+    const before = inventoryStamp(home);
     const child = execFile('hermes', [...profile, 'pins', 'data'], {
       env: { ...process.env, HERMES_HOME: home, HERMES_DISABLE_LAZY_INSTALLS: '1' },
       timeout: 20000, maxBuffer: 32 * 1024 * 1024, encoding: 'utf8',
@@ -71,6 +123,7 @@ export default function register(sdk) {
           seen.add(row.id);
           return { ...row, title: clean(row.title) || 'Untitled chat', model: clean(row.model) || 'model not recorded', pinned: Boolean(row.pinned) };
         });
+        cache.store(rows, before);
         land(state.token, s => ({ ...s, rows, loading: false, error: '', index: Math.min(s.index, Math.max(0, matches({ ...s, rows }).length - 1)) }));
       } catch (err) { land(state.token, s => ({ ...s, rows: [], index: 0, loading: false, error: clean(err.message) })); }
     });
@@ -143,14 +196,15 @@ export default function register(sdk) {
     init: arg => {
       cancelAll();
       const input = clean(arg);
-      return { token: randomUUID(), home, rows: [], query: ['all', 'find', 'list', 'manage'].includes(input) ? '' : input,
-        all: ['all', 'find'].includes(input), index: 0, loading: true, busy: false, error: '' };
+      const cached = validHome ? cache.read() : null;
+      return { token: randomUUID(), home, rows: cached ?? [], query: ['all', 'find', 'list', 'manage'].includes(input) ? '' : input,
+        all: ['all', 'find'].includes(input), index: 0, loading: cached === null, busy: false, error: '' };
     },
     reduce: (state, { ch, key }) => {
       if (key.escape || sdk.isCtrl(key, ch, 'c')) { cancel(state.token); return null; }
       if (!validHome || state.home !== home) return { ...state, rows: [], index: 0, loading: false, error: 'This profile home cannot round-trip safely. Close and reopen the picker.' };
       if (state.busy) return state;
-      if (sdk.isCtrl(key, ch, 'r')) { load(state); return { ...state, loading: true, error: '' }; }
+      if (sdk.isCtrl(key, ch, 'r')) { load(state, true); return { ...state, rows: [], index: 0, loading: true, error: '' }; }
       if (key.tab) return { ...state, all: !state.all, index: 0, error: '' };
       if (sdk.isCtrl(key, ch, 'u')) return { ...state, query: '', index: 0, error: '' };
       if (key.backspace || key.delete) return { ...state, query: Array.from(state.query).slice(0, -1).join(''), index: 0, error: '' };

@@ -3,6 +3,21 @@
 Keep important Hermes chats easy to find without deleting your worker chats.
 A small Python plugin: no model calls, network requests, extra packages, or core patches.
 
+## Faster reopening (v0.4.0)
+
+The picker reuses the last successful metadata inventory in memory
+for up to 30 seconds while the profile's SQLite DB and WAL fingerprints remain
+unchanged. Reopening an unchanged picker avoids starting `hermes pins data` again.
+Database/WAL changes, expiry, a widget reload, or **Ctrl+R** require a fresh read;
+refresh clears the old rows and never falls back to them on failure. No cache is
+written to disk and the native visibility projection is unchanged.
+
+This improves **reopening**, not first-open or forced-refresh latency. Enter
+still copies the resume command; composer autofill and same-view navigation need
+a public host API ([proposal #158663](https://github.com/NousResearch/hermes-agent/issues/158663)).
+The loading changes passed independent source review and 18 Node tests. Real
+native Ink keyboard/rendering acceptance remains unverified.
+
 ## Native in-chat picker (0.3.9)
 
 The in-chat picker uses Hermes's stock widget SDK and needs no core patch.
@@ -35,8 +50,9 @@ stock fallback if discovery is delayed. No restart is required.
 Copy/paste is the navigation and pin-management handoff, not automatic
 Enter-to-open or a tested live-turn continuity claim. Independent source review,
 syntax checks, native plugin validation and live widget registration were
-verified. Automated product tests and real native interactive acceptance have
-not yet been completed for this build; those checks are not implied by release.
+verified for v0.3.9. Its post-publication automated checks passed 57 Python and
+7 Node tests after a test-fixture repair. Real native interactive acceptance is
+still unverified; registration and automated checks do not imply it.
 
 `hermes pins remove-ui` removes only the exact unchanged bundled widget. Plugin
 removal alone does not remove this explicitly installed user-widget file.

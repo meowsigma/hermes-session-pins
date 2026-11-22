@@ -1,5 +1,5 @@
 name: session-pins
-version: 0.3.9
+version: 0.4.0
 description: "★ Native in-chat Session Pins picker; no core patch."
 author: meowsigma
 kind: standalone
