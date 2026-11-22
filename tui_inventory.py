@@ -28,7 +28,7 @@ def main() -> int:
         return UNSUPPORTED
     sys.path[:0] = [str(root.resolve()), str(packages.resolve())]
     try:
-        from hermes_cli import __version__
+        from hermes_cli.version_info import get_version_info
         from hermes_cli.config import read_raw_config_readonly
         from hermes_constants import get_hermes_home
         from packaging.specifiers import SpecifierSet
@@ -57,7 +57,7 @@ def main() -> int:
     try:
         # Qualify the manifest we ship, not arbitrary plugin dependency rules.
         if (manifest.get("requires_hermes") != ">=0.22.5" or
-                Version(__version__) not in SpecifierSet(manifest["requires_hermes"]) or
+                Version(get_version_info().base_version) not in SpecifierSet(manifest["requires_hermes"]) or
                 manifest.get("requires_plugins") or manifest.get("depends") or manifest.get("hermes")):
             return UNSUPPORTED
     except InvalidVersion:
