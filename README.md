@@ -3,7 +3,7 @@
 Keep important Hermes chats easy to find without deleting your worker chats.
 A small Python plugin: no model calls, network requests, extra packages, or core patches.
 
-## Staged for v0.4.1 — publication held
+## Read-only pin status (v0.4.1)
 
 `/pin status` reports whether the calling chat is pinned, using its exact
 host-supplied session ID and a read-only database view. It does not change pins,
@@ -12,11 +12,9 @@ is an error, not an "unpinned" result. The exact lowercase argument `status`
 is reserved for this check; pin a chat titled `status` by its full ID instead.
 `/unpin status` and shell `hermes pins pin status` keep their selector behavior.
 
-The requested `/pin all` (currently open chats, not recent history) and bold
-`(This one)` marker in the native picker are deferred pending public host APIs
-for live attached-chat discovery and per-launch current-chat identity. No
-private core hooks, registry-file scraping or guessed current-chat labels are
-used. This branch is not a published v0.4.1 release.
+This release adds status only. `/pin all` (currently open chats, not recent
+history) is deferred while native/plugin-only discovery is investigated.
+The `(This one)` picker marker is also deferred. Neither feature is included.
 
 ## Faster reopening (v0.4.0)
 
@@ -94,6 +92,7 @@ catalog, reopen that client. No background-service restart is required by this p
 | Command | Action |
 |---|---|
 | `/pin` | Pin the current chat; safe to repeat. |
+| `/pin status` | Report whether the current chat is pinned, without changing it. |
 | `/unpin` | Unpin the current chat. |
 | `/pin example-session` | Pin the chat with that exact stored title without switching chats. |
 | `/pin LOCAL_ID` | Pin the chat with that full local session ID. |
