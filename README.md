@@ -62,9 +62,15 @@ the chosen chat disappears, refresh and reselect before confirming. This plugin
 does not alter the built-in `/resume` picker. Outside Ink, `/pins` uses Hermes's
 choice UI and returns a resume command rather than opening a chat.
 
-Reopening can reuse metadata for up to 30 seconds if the profile's DB and WAL
-fingerprints are unchanged. First open, expiry, DB changes, widget reload, and
-Ctrl+R require a fresh read. Failed refreshes never restore stale rows.
+On a supported local Linux launch with a matching plugin and widget, the
+selector reads through the TUI's existing Python runtime rather than starting
+the full Hermes CLI. Other launches keep the CLI path. Both use the same native
+session inventory. The selector keeps the chat background unchanged and shows
+a static loading hint while waiting.
+
+Reopening can reuse metadata for up to 30 seconds if the DB, WAL and local
+plugin configuration are unchanged. First open, expiry, DB changes, widget
+reload, and Ctrl+R require a fresh read. Failed refreshes never restore stale rows.
 
 ## From a terminal
 

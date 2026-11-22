@@ -33,7 +33,7 @@ function harness(t) {
     fs.rmSync(home, { recursive: true, force: true });
   });
   const h = {
-    get state() { return state; }, pending,
+    get state() { return state; }, pending, home,
     open() { state = app.init(''); const view = app.render({ state }); view.type(view.props); },
     mount() { effects.shift()(); },
     key(key, ch = '') { state = app.reduce(state, { key, ch }); },
@@ -48,15 +48,17 @@ function harness(t) {
 
 test('a cached mount makes one metadata decision, not a second racy cache read', t => {
   const h = harness(t);
-  h.open();
-  assert.equal(h.state.loading, false);
   const real = fs.statSync;
   let checks = 0;
   t.mock.method(fs, 'statSync', (...args) => {
-    if (++checks > 2) throw Object.assign(new Error('synthetic second-check failure'), { code: 'EIO' });
+    if (/\/state\.db(?:-wal)?$/.test(args[0]) && ++checks > 2) {
+      throw Object.assign(new Error('synthetic second-check failure'), { code: 'EIO' });
+    }
     return real(...args);
   });
   syncBuiltinESMExports();
+  h.open();
+  assert.equal(h.state.loading, false);
   h.mount();
   assert.equal(checks, 2, 'one DB + WAL check; no gap between two cache decisions');
   assert.equal(h.pending.length, 0);
@@ -66,9 +68,9 @@ test('a cached mount makes one metadata decision, not a second racy cache read',
 
 test('cache rejection clears selectable rows before reload, and late replies stay closed', t => {
   const h = harness(t);
-  h.open();
   t.mock.method(fs, 'statSync', () => { throw Object.assign(new Error('synthetic metadata failure'), { code: 'EIO' }); });
   syncBuiltinESMExports();
+  h.open();
   h.mount();
   assert.equal(h.state.loading, true);
   assert.deepEqual(h.state.rows, []);
@@ -96,4 +98,19 @@ test('forced refresh bypasses cache and a failed refresh cannot restore old rows
   h.open();
   assert.equal(h.state.loading, true);
   assert.deepEqual(h.state.rows, []);
+});
+
+test('a profile enablement edit invalidates a warm reopen and fences an in-flight reply', t => {
+  const h = harness(t);
+  const config = join(h.home, 'config.yaml');
+  fs.writeFileSync(config, 'plugins: {enabled: [session-pins]}');
+  h.open();
+  assert.equal(h.state.loading, true);
+  assert.deepEqual(h.state.rows, []);
+  h.mount();
+  fs.writeFileSync(config, 'plugins: {disabled: [session-pins]}');
+  h.succeed();
+  assert.equal(h.state.loading, false);
+  assert.deepEqual(h.state.rows, []);
+  assert.match(h.state.error, /configuration changed/);
 });

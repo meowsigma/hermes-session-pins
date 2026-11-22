@@ -47,6 +47,10 @@ def inventory(home: Path) -> dict:
     return {"home": str(home), "rows": result}
 
 
+def inventory_json(home: Path) -> str:
+    return json.dumps(inventory(home), ensure_ascii=True)
+
+
 def install(home: Path) -> Path:
     """Explicit install only; plugin registration itself has no file effects."""
     source = Path(__file__).parent / "tui" / "pins.mjs"

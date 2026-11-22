@@ -400,8 +400,7 @@ def cli(args):
                 import tui_bridge
             home = Path(get_hermes_home()).absolute()
             if args.action == "data":
-                import json
-                print(json.dumps(tui_bridge.inventory(home), ensure_ascii=True))
+                print(tui_bridge.inventory_json(home))
             elif args.action == "install-ui":
                 print(f"Native widget installed: {tui_bridge.install(home)}\nUse /pins in the existing Ink chat; /widgets-reload if needed.")
             else:

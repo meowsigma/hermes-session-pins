@@ -112,3 +112,25 @@ test('invalid-home refresh returns the terminal error state, not a stuck loader'
     else process.env.HERMES_HOME = original;
   }
 });
+
+test('loading, results and errors reuse one dialog geometry without a viewport scrim', () => {
+  let app;
+  const sdk = { defineWidgetApp: a => (app = a), React: { useEffect() {} },
+    h: (type, props, ...children) => ({ type, props, children }),
+    Overlay: 'Overlay', Dialog: 'Dialog', Text: 'Text', Box: 'Box', ShimmerRows: 'ShimmerRows' };
+  register(sdk);
+  for (const height of [16, 26, 32]) {
+    const phases = [{ ...base, rows: [], loading: true }, base, { ...base, rows: [], error: 'Unavailable' }];
+    const heights = phases.map(state => {
+      const view = app.render({ state, cols: 100, rows: height, t: { color: {} } });
+      const component = view.type(view.props);
+      const tree = component.type(component.props);
+      assert.equal(tree.type, 'Overlay');
+      assert.notEqual(tree.props.backdrop, true);
+      assert.ok(!JSON.stringify(tree).includes('ShimmerRows'));
+      return tree.children[0].children.find(node => node?.props?.height)?.props.height;
+    });
+    assert.ok(heights[0] > 0);
+    assert.ok(heights.every(n => n === heights[0]));
+  }
+});

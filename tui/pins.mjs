@@ -1,10 +1,11 @@
 // Session Pins native user widget — public SDK only; no Hermes core imports.
 import { execFile, execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { statSync } from 'node:fs';
+import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import { homedir, platform } from 'node:os';
-import { resolve, dirname, basename, isAbsolute } from 'node:path';
+import { resolve, dirname, basename, delimiter, isAbsolute } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export const clean = value => String(value ?? '').replace(/[\p{C}]/gu, '').replace(/\s+/gu, ' ').trim();
 export function matches(state) {
@@ -73,15 +74,55 @@ export function inventoryCache(home, { now = () => performance.now(), stamp = in
   };
 }
 
+const truthy = value => /^(1|true|yes|on)$/i.test((value ?? '').trim());
+const bypass = () => truthy(process.env.HERMES_SAFE_MODE) || truthy(process.env.HERMES_IGNORE_USER_CONFIG);
+
+// Use the local TUI launcher's already activated source/site pair. Don't
+// discover another Python, execute .pth files, or search PM directories.
+function fastInventory(home, plugin, registeredBytes) {
+  const { HERMES_PYTHON: python, HERMES_PYTHON_SRC_ROOT: root, PYTHONPATH } = process.env;
+  const paths = PYTHONPATH?.split(delimiter) ?? [];
+  if (!registeredBytes || !process.env.HERMES_HOME || platform() !== 'linux' || paths.length !== 2 ||
+      ![python, root, ...paths].every(p => p && isAbsolute(p))) return null;
+  try {
+    if (realpathSync(root) !== realpathSync(paths[0]) || !statSync(python).isFile() || !statSync(paths[1]).isDirectory()) return null;
+    const helper = resolve(plugin, 'tui_inventory.py');
+    if (!statSync(helper).isFile() || !statSync(resolve(plugin, 'plugin.yaml')).isFile() ||
+        !readFileSync(resolve(plugin, 'tui/pins.mjs')).equals(registeredBytes)) return null;
+    return [python, ['-I', '-S', '-B', helper, home, root, paths[1]]];
+  } catch { return null; }
+}
+
 // Frozen at registration: an ambient/profile change can never redirect a list
 // or refresh. A response from a different home is rejected, not relabelled.
 export default function register(sdk) {
-  const { h, Box, Text, Dialog, Overlay, ShimmerRows, React } = sdk;
+  const { h, Box, Text, Dialog, Overlay, React } = sdk;
   const rawHome = process.env.HERMES_HOME || resolve(homedir(), '.hermes');
   const validHome = isAbsolute(rawHome) && rawHome === rawHome.trim() && !rawHome.includes('$') && !rawHome.startsWith('~');
   const home = resolve(rawHome);
   const profile = basename(dirname(home)) === 'profiles' ? [] : ['--profile', 'default'];
-  const cache = inventoryCache(home);
+  const plugin = resolve(home, 'plugins/session-pins');
+  let registeredBytes;
+  try { registeredBytes = readFileSync(fileURLToPath(import.meta.url)); } catch { /* compatibility only */ }
+  // These scopes can change enablement outside the profile-local cache key.
+  const compatibilityPolicy = () => truthy(process.env.HERMES_ENABLE_PROJECT_PLUGINS) ||
+    Boolean(process.env.HERMES_MANAGED_DIR || process.env.HERMES_CONFIG_PATH || process.env.HERMES_ENV_PATH) ||
+    statSync('/etc/hermes', { throwIfNoEntry: false }) !== undefined;
+  const authorityStamp = () => {
+    try {
+      if (bypass() || compatibilityPolicy()) return null;
+      return JSON.stringify(['config.yaml', '.env', 'plugins/session-pins/plugin.yaml',
+        'plugins/session-pins/tui/pins.mjs', 'plugins/session-pins/tui_inventory.py'].map(file => {
+        const s = statSync(resolve(home, file), { bigint: true, throwIfNoEntry: false });
+        return s ? [s.dev, s.ino, s.size, s.mtimeNs, s.ctimeNs].join(':') : null;
+      }));
+    } catch { return null; }
+  };
+  const stamp = (authority = authorityStamp()) => {
+    const db = inventoryStamp(home);
+    return db === null || authority === null ? null : `${db}/${authority}`;
+  };
+  const cache = inventoryCache(home, { stamp: () => stamp() });
 
   const children = new Map();
   const cancel = token => {
@@ -91,44 +132,49 @@ export default function register(sdk) {
   };
   const cancelAll = () => { for (const token of children.keys()) cancel(token); };
   const land = (token, fn) => sdk.updateWidget(app, state => state.token === token ? fn(state) : state);
-  function load(state, force = false) {
-    if (!validHome || state.home !== home) {
-      land(state.token, s => ({ ...s, rows: [], index: 0, loading: false, error: 'This profile home cannot round-trip safely.' }));
-      return;
-    }
+  function load(state) {
     cancel(state.token);
-    const cached = !force && cache.read();
-    if (cached) {
-      land(state.token, s => ({ ...s, rows: cached, loading: false, error: '' }));
-      return;
-    }
     cache.clear();
-    // One cache decision owns both display validity and subprocess admission.
-    // Never leave rows actionable after this load has rejected their cache.
-    land(state.token, s => ({ ...s, rows: [], index: 0, loading: true, error: '' }));
-    const before = inventoryStamp(home);
-    const child = execFile('hermes', [...profile, 'pins', 'data'], {
-      env: { ...process.env, HERMES_HOME: home, HERMES_DISABLE_LAZY_INSTALLS: '1' },
-      timeout: 20000, maxBuffer: 32 * 1024 * 1024, encoding: 'utf8',
-    }, (error, stdout) => {
-      if (children.get(state.token) !== child) return;
-      children.delete(state.token);
-      try {
-        if (error) throw new Error('Could not read chats. Check that Session Pins is enabled; Ctrl+R retries.');
-        const data = JSON.parse(stdout);
-        if (data.home !== home || !Array.isArray(data.rows)) throw new Error('Profile mismatch; refusing these chats.');
-        const seen = new Set();
-        const rows = data.rows.map(row => {
-          if (!row || typeof row.id !== 'string' || !row.id || seen.has(row.id) || typeof row.title !== 'string') throw new Error('Invalid chat inventory.');
-          seen.add(row.id);
-          return { ...row, title: clean(row.title) || 'Untitled chat', model: clean(row.model) || 'model not recorded', pinned: Boolean(row.pinned) };
-        });
-        cache.store(rows, before);
-        land(state.token, s => ({ ...s, rows, loading: false, error: '', index: Math.min(s.index, Math.max(0, matches({ ...s, rows }).length - 1)) }));
-      } catch (err) { land(state.token, s => ({ ...s, rows: [], index: 0, loading: false, error: clean(err.message) })); }
-    });
-    children.set(state.token, child);
-    child.stdin?.end();
+    const authority = authorityStamp();
+    const before = stamp(authority);
+    spawn(authority === null ? null : fastInventory(home, plugin, registeredBytes));
+
+    function spawn(command, cacheable = true) {
+      const [file, args] = command ?? ['hermes', [...profile, 'pins', 'data']];
+      const child = execFile(file, args, {
+        env: command ? { HERMES_HOME: home } : { ...process.env, HERMES_HOME: home, HERMES_DISABLE_LAZY_INSTALLS: '1' },
+        timeout: 20000, maxBuffer: 32 * 1024 * 1024, encoding: 'utf8',
+      }, (error, stdout) => {
+        if (children.get(state.token) !== child) return;
+        children.delete(state.token);
+        if (bypass() || (authority !== null && authorityStamp() !== authority)) {
+          land(state.token, s => ({ ...s, rows: [], index: 0, loading: false, error: 'Session Pins configuration changed. Ctrl+R retries.' }));
+          return;
+        }
+        // A pre-read compatibility refusal can use stock dispatch. Never
+        // retry a profile, permission, timeout or inventory failure.
+        if (command && error?.code === 78) { spawn(null, false); return; }
+        try {
+          if (error) throw new Error('Could not read chats. Check that Session Pins is enabled; Ctrl+R retries.');
+          let data;
+          try { data = JSON.parse(stdout); } catch { throw new Error('Invalid chat inventory.'); }
+          if (data?.home !== home || !Array.isArray(data.rows)) throw new Error('Profile mismatch; refusing these chats.');
+          const seen = new Set();
+          const rows = data.rows.map(row => {
+            if (!row || typeof row.id !== 'string' || !row.id || seen.has(row.id) || typeof row.title !== 'string') throw new Error('Invalid chat inventory.');
+            seen.add(row.id);
+            return { id: row.id, title: clean(row.title) || 'Untitled chat', model: clean(row.model) || 'model not recorded',
+              pinned: row.pinned === true, updated: typeof row.updated === 'number' ? row.updated : 0 };
+          });
+          land(state.token, s => {
+            if (cacheable) cache.store(rows, before);
+            return { ...s, rows, loading: false, error: '', index: Math.min(s.index, Math.max(0, matches({ ...s, rows }).length - 1)) };
+          });
+        } catch (err) { land(state.token, s => ({ ...s, rows: [], index: 0, loading: false, error: clean(err.message) })); }
+      });
+      children.set(state.token, child);
+      child.stdin?.end();
+    }
   }
   function copy(state, action) {
     let command;
@@ -152,19 +198,22 @@ export default function register(sdk) {
   }
   function View({ state, t, cols, rows }) {
     React.useEffect(() => () => cancel(state.token), [state.token]);
-    if (cols < 40 || rows < 16) return h(Overlay, { backdrop: true }, h(Dialog, { width: Math.max(8, cols - 2) },
+    if (cols < 40 || rows < 16) return h(Overlay, {}, h(Dialog, { width: Math.max(8, cols - 2) },
       h(Text, { color: t.color.muted, wrap: 'truncate-end' }, 'Enlarge terminal to 40×16; Esc closes.')));
     const width = Math.max(12, Math.min(112, cols - 4));
     const inner = Math.max(1, width - 6);
     const compact = rows < 26;
-    const room = Math.max(1, Math.min(10, Math.floor((rows - (compact ? 14 : 17)) / (compact ? 1 : 2))));
+    const rowHeight = compact ? 1 : 2;
+    const room = Math.max(1, Math.min(10, Math.floor((rows - (compact ? 14 : 19)) / rowHeight)));
     const filtered = matches(state);
     const index = Math.min(state.index, Math.max(0, filtered.length - 1));
     const start = Math.max(0, Math.min(index - Math.floor(room / 2), filtered.length - room));
     const row = filtered[index];
     const pinCount = state.rows.filter(r => r.pinned).length;
     const text = (value, props = {}) => h(Text, { color: t.color.muted, wrap: 'truncate-end', ...props }, value);
-    return h(Overlay, { backdrop: true }, h(Dialog, { width },
+    // Dialog is already opaque. Don't repaint the transcript with a
+    // contrasting full-screen scrim, or move the dialog as results arrive.
+    return h(Overlay, {}, h(Dialog, { width },
       h(Box, { justifyContent: 'space-between', width: inner },
         text('Session Pins', { bold: true, color: t.color.primary }), text('Esc close')),
       h(Box, { gap: 3, marginTop: compact ? 0 : 1 },
@@ -172,8 +221,9 @@ export default function register(sdk) {
         text(`All chats ${state.rows.length}`, { bold: state.all, color: state.all ? t.color.primary : t.color.muted }),
         text('Tab / ←→ switch')),
       h(Box, { marginTop: compact ? 0 : 1 }, text(`Search: ${state.query || 'type a title or ID…'}`, { color: state.query ? t.color.label : t.color.muted })),
-      state.loading ? h(ShimmerRows, { rows: Math.min(3, room), width: Math.max(1, inner), t }) : h(Box, { flexDirection: 'column', marginTop: compact ? 0 : 1 },
-        text(`${filtered.length} matching ${state.all ? 'chats' : 'pins'}${filtered.length ? ` · ${index + 1}/${filtered.length}` : ''}${start ? ` · ↑ ${start} above` : ''}`),
+      h(Box, { flexDirection: 'column', height: room * rowHeight + 2, marginTop: compact ? 0 : 1 },
+        state.error ? text(state.error, { color: t.color.error }) : text(state.loading ? 'Loading chats…' :
+          `${filtered.length} matching ${state.all ? 'chats' : 'pins'}${filtered.length ? ` · ${index + 1}/${filtered.length}` : ''}${start ? ` · ↑ ${start} above` : ''}`),
         ...filtered.slice(start, start + room).map((r, offset) => {
           const active = start + offset === index;
           const color = active ? t.color.primary : t.color.label;
@@ -181,10 +231,9 @@ export default function register(sdk) {
             text(`${active ? '›' : ' '} ${r.pinned ? '★' : '·'} ${r.title}`, { bold: active, color }),
             !compact && text(`    ${r.model} · ${age(r.updated)}`));
         }),
-        !filtered.length && text(state.query ? 'No matching chats. Backspace edits; Ctrl+U clears.' : state.all ? 'No visible chats yet.' : 'No visible pins. Tab browses all chats.'),
+        !state.loading && !state.error && !filtered.length && text(state.query ? 'No matching chats. Backspace edits; Ctrl+U clears.' : state.all ? 'No visible chats yet.' : 'No visible pins. Tab browses all chats.'),
         start + room < filtered.length && text(`↓ ${filtered.length - start - room} more below`)),
       !compact && h(Box, { marginTop: 1 }, text(row ? `ID: ${clean(row.id)}` : 'ID: —')),
-      state.error && text(state.error, { color: t.color.error }),
       h(Box, { marginTop: compact ? 0 : 1, flexDirection: 'column' },
         text(state.busy ? 'Copying…' : '↑↓ select · Enter copy resume · Ctrl+P copy pin/unpin'),
         text('Ctrl+R refresh · Esc close · then paste + Enter in this chat'),
@@ -197,14 +246,16 @@ export default function register(sdk) {
       cancelAll();
       const input = clean(arg);
       const cached = validHome ? cache.read() : null;
-      return { token: randomUUID(), home, rows: cached ?? [], query: ['all', 'find', 'list', 'manage'].includes(input) ? '' : input,
-        all: ['all', 'find'].includes(input), index: 0, loading: cached === null, busy: false, error: '' };
+      const error = !validHome ? 'This profile home cannot round-trip safely.' : bypass() ? 'Session Pins is unavailable with user configuration disabled.' : '';
+      return { token: randomUUID(), home, rows: error ? [] : cached ?? [], query: ['all', 'find', 'list', 'manage'].includes(input) ? '' : input,
+        all: ['all', 'find'].includes(input), index: 0, loading: !error && cached === null, busy: false, error };
     },
     reduce: (state, { ch, key }) => {
       if (key.escape || sdk.isCtrl(key, ch, 'c')) { cancel(state.token); return null; }
       if (!validHome || state.home !== home) return { ...state, rows: [], index: 0, loading: false, error: 'This profile home cannot round-trip safely. Close and reopen the picker.' };
+      if (bypass()) { cancel(state.token); return { ...state, rows: [], index: 0, loading: false, error: 'Session Pins is unavailable with user configuration disabled.' }; }
       if (state.busy) return state;
-      if (sdk.isCtrl(key, ch, 'r')) { load(state, true); return { ...state, rows: [], index: 0, loading: true, error: '' }; }
+      if (sdk.isCtrl(key, ch, 'r')) { load(state); return { ...state, rows: [], index: 0, loading: true, error: '' }; }
       if (key.tab || key.leftArrow || key.rightArrow) return {
         ...state, all: key.leftArrow ? false : key.rightArrow ? true : !state.all, index: 0, error: '',
       };
@@ -224,7 +275,7 @@ export default function register(sdk) {
     render: props => h(LoadedView, props),
   });
   function LoadedView(props) {
-    React.useEffect(() => { load(props.state); }, [props.state.token]);
+    React.useEffect(() => { if (props.state.loading && !children.has(props.state.token)) load(props.state); }, [props.state.token]);
     return h(View, props);
   }
 }
