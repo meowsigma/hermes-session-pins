@@ -3,6 +3,21 @@
 Keep important Hermes chats easy to find without deleting your worker chats.
 A small Python plugin: no model calls, network requests, extra packages, or core patches.
 
+## Staged for v0.4.1 — publication held
+
+`/pin status` reports whether the calling chat is pinned, using its exact
+host-supplied session ID and a read-only database view. It does not change pins,
+titles, visibility or message contents. A missing session or unavailable store
+is an error, not an "unpinned" result. The exact lowercase argument `status`
+is reserved for this check; pin a chat titled `status` by its full ID instead.
+`/unpin status` and shell `hermes pins pin status` keep their selector behavior.
+
+The requested `/pin all` (currently open chats, not recent history) and bold
+`(This one)` marker in the native picker are deferred pending public host APIs
+for live attached-chat discovery and per-launch current-chat identity. No
+private core hooks, registry-file scraping or guessed current-chat labels are
+used. This branch is not a published v0.4.1 release.
+
 ## Faster reopening (v0.4.0)
 
 The picker reuses the last successful metadata inventory in memory

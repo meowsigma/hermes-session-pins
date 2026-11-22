@@ -183,10 +183,26 @@ def require_local(platform: str) -> None:
         raise PinsError("Session Pins is for local Hermes terminals and Desktop, not messaging chats.")
 
 
+def pin_status(session_id: str) -> str:
+    """Read the calling chat's exact key; never resolve a title or prefix."""
+    if not session_id:
+        raise PinsError("No current session yet. Send a message first, then use /pin status.")
+    home = Path(get_hermes_home())
+    with database(home=home) as db:
+        row = db.get_session(session_id)
+    if row is None:
+        raise PinsError("That current session no longer exists in this profile. Refresh and try again.")
+    if row.get("pinned"):
+        return f"{STAR} This chat is pinned: {title(row)}"
+    return f"This chat is not pinned: {title(row)}\nUse /pin to pin it."
+
+
 def command_pin(raw_args: str, *, session_id: str = "", platform: str = "", pinned: bool = True) -> str:
     try:
         require_local(platform)
         selector = raw_args.strip()
+        if pinned and selector == "status":
+            return pin_status(session_id)
         row = set_pin(selector or session_id, pinned, exact=not bool(selector))
         if pinned:
             hint = ("This chat is still marked hidden; Hermes may omit it from pin lists."
@@ -435,8 +451,8 @@ def cli(args):
 
 
 def register(ctx):
-    ctx.register_command("pin", command_pin, description="★ Pin this chat or another by exact title or session ID",
-                         args_hint="[title-or-id]")
+    ctx.register_command("pin", command_pin, description="★ Pin a chat or check this chat's pin status",
+                         args_hint="[status|title-or-id]")
 
     def unpin(raw_args: str, *, session_id: str = "", platform: str = ""):
         return command_pin(raw_args, session_id=session_id, platform=platform, pinned=False)

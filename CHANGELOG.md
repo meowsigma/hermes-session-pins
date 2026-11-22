@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — v0.4.1 held
+
+- Add `/pin status`: a read-only check of the exact calling chat's pin flag.
+  Empty/missing sessions and database errors are reported without changing pins.
+- Reserve the exact lowercase `/pin status` argument; use a full session ID
+  to pin a chat titled `status`. `/unpin status` keeps its selector behavior.
+- Publication is held by owner choice: `/pin all` for currently open chats and
+  the native picker's bold `(This one)` marker await supported host APIs.
+
 ## 0.4.0
 
 - Reopen an unchanged in-chat picker without launching a new inventory process:
