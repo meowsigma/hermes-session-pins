@@ -43,10 +43,10 @@ class InventoryHelperTests(unittest.TestCase):
             self.assertTrue(data["rows"][0]["pinned"])
             before = (home / "state.db").read_bytes()
 
-            def run(**env):
+            def run(version="0.22.5", **env):
                 return subprocess.run(
                     [sys.executable, "-I", "-S", "-B", str(link / "tui_inventory.py"),
-                     str(home), *paths], env={"HERMES_HOME": str(home), **env},
+                     str(home), *paths, version], env={"HERMES_HOME": str(home), **env},
                     cwd=base, capture_output=True, timeout=10,
                 )
 
@@ -54,6 +54,9 @@ class InventoryHelperTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout), data)
             self.assertNotIn(b"fixture-only transcript", result.stdout)
+            for version in ("0.22.4", "unknown"):
+                result = run(version=version)
+                self.assertEqual((result.returncode, result.stdout), (78, b""))
             for env in ({"HERMES_HOME": str(base)}, {"HERMES_SAFE_MODE": "1"}):
                 result = run(**env)
                 self.assertEqual((result.returncode, result.stdout), (1, b""))

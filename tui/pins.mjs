@@ -53,7 +53,7 @@ export function inventoryStamp(home) {
 }
 
 // One short-lived, profile-local entry, kept only in this widget registration.
-// No disk cache, transcript previews, timers, startup prefetch or extra process.
+// No disk cache, transcript previews, timers, startup prefetch or cache process.
 export function inventoryCache(home, { now = () => performance.now(), stamp = inventoryStamp } = {}) {
   let entry;
   return {
@@ -76,6 +76,48 @@ export function inventoryCache(home, { now = () => performance.now(), stamp = in
 
 const truthy = value => /^(1|true|yes|on)$/i.test((value ?? '').trim());
 const bypass = () => truthy(process.env.HERMES_SAFE_MODE) || truthy(process.env.HERMES_IGNORE_USER_CONFIG);
+
+// Public CLI qualification is shared across widget remounts, not sessions.
+// Until it completes, retain stock dispatch rather than guessing a version.
+const runtimeQualifications = new Map();
+export function runtimeVersion(stdout, root) {
+  const version = /^Hermes Agent v([^\s]+)(?:\s|$)/m.exec(stdout)?.[1];
+  const directory = /^Install directory: (.+)$/m.exec(stdout)?.[1];
+  if (!version || !directory) return null;
+  try { return realpathSync(directory) === realpathSync(root) ? version : null; }
+  catch { return null; }
+}
+export function qualifyInventory(command, home, profile, { run = execFile, entries = runtimeQualifications, refresh = false } = {}) {
+  if (!command) return { status: 'unsupported' };
+  const root = command[1][5];
+  let key;
+  try {
+    key = JSON.stringify([home, command, ...['install-stamp.json', 'pyproject.toml', 'hermes_state.py', 'hermes_cli/__init__.py'].map(file => {
+      const s = statSync(resolve(root, file), { bigint: true, throwIfNoEntry: false });
+      return s ? [s.dev, s.ino, s.size, s.mtimeNs, s.ctimeNs].join(':') : null;
+    })]);
+  } catch { return { status: 'unsupported' }; }
+  let entry = entries.get(key);
+  // A refusal is sticky until the owner explicitly requests another attempt.
+  if (refresh && entry?.status === 'refused') { entries.delete(key); entry = null; }
+  if (!entry) {
+    entry = { status: 'pending' };
+    entries.set(key, entry);
+    try {
+      const child = run('hermes', [...profile, '--version'], {
+        env: { ...process.env, HERMES_HOME: home, HERMES_DISABLE_LAZY_INSTALLS: '1' },
+        timeout: 20000, maxBuffer: 65536, encoding: 'utf8',
+      }, (error, stdout) => {
+        if (error) { entry.status = 'refused'; return; }
+        const version = runtimeVersion(stdout, root);
+        entry.status = version ? 'ready' : 'unsupported';
+        if (version) entry.command = [command[0], [...command[1], version]];
+      });
+      child.stdin?.end();
+    } catch { entry.status = 'refused'; }
+  }
+  return entry;
+}
 
 // Use the local TUI launcher's already activated source/site pair. Don't
 // discover another Python, execute .pth files, or search PM directories.
@@ -123,6 +165,8 @@ export default function register(sdk) {
     return db === null || authority === null ? null : `${db}/${authority}`;
   };
   const cache = inventoryCache(home, { stamp: () => stamp() });
+  const qualification = (refresh = false) => !validHome || authorityStamp() === null ? { status: 'unsupported' } :
+    qualifyInventory(fastInventory(home, plugin, registeredBytes), home, profile, { refresh });
 
   const children = new Map();
   const cancel = token => {
@@ -132,12 +176,17 @@ export default function register(sdk) {
   };
   const cancelAll = () => { for (const token of children.keys()) cancel(token); };
   const land = (token, fn) => sdk.updateWidget(app, state => state.token === token ? fn(state) : state);
-  function load(state) {
+  function load(state, refresh = false) {
     cancel(state.token);
     cache.clear();
     const authority = authorityStamp();
     const before = stamp(authority);
-    spawn(authority === null ? null : fastInventory(home, plugin, registeredBytes));
+    const qualified = qualification(refresh);
+    if (qualified.status === 'refused') {
+      land(state.token, s => ({ ...s, rows: [], index: 0, loading: false, error: 'Runtime version check failed. Resolve it, then Ctrl+R to retry.' }));
+      return;
+    }
+    spawn(qualified.status === 'ready' ? qualified.command : null);
 
     function spawn(command, cacheable = true) {
       const [file, args] = command ?? ['hermes', [...profile, 'pins', 'data']];
@@ -246,7 +295,8 @@ export default function register(sdk) {
       cancelAll();
       const input = clean(arg);
       const cached = validHome ? cache.read() : null;
-      const error = !validHome ? 'This profile home cannot round-trip safely.' : bypass() ? 'Session Pins is unavailable with user configuration disabled.' : '';
+      const error = !validHome ? 'This profile home cannot round-trip safely.' : bypass() ? 'Session Pins is unavailable with user configuration disabled.' :
+        qualification().status === 'refused' ? 'Runtime version check failed. Resolve it, then Ctrl+R to retry.' : '';
       return { token: randomUUID(), home, rows: error ? [] : cached ?? [], query: ['all', 'find', 'list', 'manage'].includes(input) ? '' : input,
         all: ['all', 'find'].includes(input), index: 0, loading: !error && cached === null, busy: false, error };
     },
@@ -255,7 +305,8 @@ export default function register(sdk) {
       if (!validHome || state.home !== home) return { ...state, rows: [], index: 0, loading: false, error: 'This profile home cannot round-trip safely. Close and reopen the picker.' };
       if (bypass()) { cancel(state.token); return { ...state, rows: [], index: 0, loading: false, error: 'Session Pins is unavailable with user configuration disabled.' }; }
       if (state.busy) return state;
-      if (sdk.isCtrl(key, ch, 'r')) { load(state); return { ...state, rows: [], index: 0, loading: true, error: '' }; }
+      if (sdk.isCtrl(key, ch, 'r')) { load(state, true); return { ...state, rows: [], index: 0, loading: true, error: '' }; }
+      if (qualification().status === 'refused') return { ...state, rows: [], index: 0, loading: false, error: 'Runtime version check failed. Resolve it, then Ctrl+R to retry.' };
       if (key.tab || key.leftArrow || key.rightArrow) return {
         ...state, all: key.leftArrow ? false : key.rightArrow ? true : !state.all, index: 0, error: '',
       };

@@ -64,9 +64,13 @@ choice UI and returns a resume command rather than opening a chat.
 
 On a supported local Linux launch with a matching plugin and widget, the
 selector reads through the TUI's existing Python runtime rather than starting
-the full Hermes CLI. Other launches keep the CLI path. Both use the same native
-session inventory. The selector keeps the chat background unchanged and shows
-a static loading hint while waiting.
+the full Hermes CLI. On the first picker open, one background `hermes --version`
+command qualifies the captured runtime (20-second timeout). This native command
+can check for updates and write its normal cache; it does not run merely because
+the plugin loaded. Opens before qualification finishes keep the stock inventory
+path and can be slower while both commands run. Other launches also keep the
+CLI inventory path. Both use the same native session inventory. The selector
+keeps the chat background unchanged and shows a static loading hint while waiting.
 
 Reopening can reuse metadata for up to 30 seconds if the DB, WAL and local
 plugin configuration are unchanged. First open, expiry, DB changes, widget

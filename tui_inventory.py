@@ -11,9 +11,11 @@ UNSUPPORTED = 78
 
 
 def main() -> int:
-    if len(sys.argv) != 4 or not sys.flags.isolated or not sys.flags.no_site:
+    if len(sys.argv) != 5 or not sys.flags.isolated or not sys.flags.no_site:
         return 1
-    home, root, packages = map(Path, sys.argv[1:])
+    home, root, packages = map(Path, sys.argv[1:4])
+    # Captured from the documented CLI version command by the paired widget.
+    runtime_version = sys.argv[4]
     if any(not p.is_absolute() for p in (home, root, packages)) or str(home) != os.environ.get("HERMES_HOME"):
         return 1
     own = home / "plugins" / "session-pins"
@@ -28,7 +30,6 @@ def main() -> int:
         return UNSUPPORTED
     sys.path[:0] = [str(root.resolve()), str(packages.resolve())]
     try:
-        from hermes_cli.version_info import get_version_info
         from hermes_cli.config import read_raw_config_readonly
         from hermes_constants import get_hermes_home
         from packaging.specifiers import SpecifierSet
@@ -57,7 +58,7 @@ def main() -> int:
     try:
         # Qualify the manifest we ship, not arbitrary plugin dependency rules.
         if (manifest.get("requires_hermes") != ">=0.22.5" or
-                Version(get_version_info().base_version) not in SpecifierSet(manifest["requires_hermes"]) or
+                Version(runtime_version) not in SpecifierSet(manifest["requires_hermes"]) or
                 manifest.get("requires_plugins") or manifest.get("depends") or manifest.get("hermes")):
             return UNSUPPORTED
     except InvalidVersion:

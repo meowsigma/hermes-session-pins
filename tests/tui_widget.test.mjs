@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
-import register, { matches, selected, copyCommand, clean, age } from '../tui/pins.mjs';
+import register, { matches, selected, copyCommand, clean, age, runtimeVersion, qualifyInventory } from '../tui/pins.mjs';
 
 const rows = [
   { id: 'first-ID', title: 'a'.repeat(200) + ' hidden-tail-needle', pinned: true },
@@ -21,6 +21,64 @@ function app() {
   return definition;
 }
 const input = (key = {}, ch = '') => ({ key, ch });
+
+test('documented CLI version must identify the captured runtime directory', () => {
+  const root = resolve('.');
+  const output = `Hermes Agent v0.22.5 (release)\nInstall directory: ${root}\n`;
+  assert.equal(runtimeVersion(output, root), '0.22.5');
+  assert.equal(runtimeVersion(output, resolve('/')), null);
+  assert.equal(runtimeVersion('0.22.5', root), null);
+  assert.equal(runtimeVersion('Hermes Agent v0.22.5\nInstall directory: /missing/pins-fixture', root), null);
+});
+
+test('runtime qualification binds scope and appends a version only after public command success', () => {
+  const root = resolve('.'), home = homedir(), entries = new Map(), calls = [];
+  const command = ['/fixture/python', ['-I', '-S', '-B', '/fixture/helper.py', home, root, '/fixture/site']];
+  let ended = 0;
+  const run = (...args) => { calls.push(args); return { stdin: { end() { ended++; } } }; };
+  const qualify = (h = home, cmd = command) => qualifyInventory(cmd, h, ['--profile', 'default'], { entries, run });
+  const entry = qualify();
+  assert.equal(entry.status, 'pending');
+  assert.equal(entry.command, undefined);
+  assert.equal(qualify(), entry);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].slice(0, 2), ['hermes', ['--profile', 'default', '--version']]);
+  assert.equal(calls[0][2].env.HERMES_HOME, home);
+  assert.equal(calls[0][2].timeout, 20000);
+  assert.equal(ended, 1);
+  calls[0][3](null, `Hermes Agent v0.22.5\nInstall directory: ${root}\n`);
+  assert.equal(entry.status, 'ready');
+  assert.deepEqual(entry.command, [command[0], [...command[1], '0.22.5']]);
+  assert.equal(entry.command[1].length, 8);
+  assert.equal(qualify(resolve(home, 'other-profile')).status, 'pending');
+  const otherRoot = [command[0], command[1].map((v, i) => i === 5 ? '/' : v)];
+  assert.equal(qualify(home, otherRoot).status, 'pending');
+  assert.equal(calls.length, 3);
+  calls[2][3](null, `Hermes Agent v0.22.5\nInstall directory: ${root}\n`);
+  assert.equal(qualify(home, otherRoot).status, 'unsupported');
+});
+
+test('version failures refuse inventory without automatic retry; explicit refresh can recover', () => {
+  const root = resolve('.'), home = homedir(), entries = new Map(), calls = [];
+  const command = ['/fixture/python', ['-I', '-S', '-B', '/fixture/helper.py', home, root, '/fixture/site']];
+  const run = (...args) => { calls.push(args); return {}; };
+  const qualify = refresh => qualifyInventory(command, home, [], { entries, run, refresh });
+  const entry = qualify();
+  calls[0][3](new Error('fixture refusal'), '');
+  assert.equal(entry.status, 'refused');
+  assert.equal(entry.command, undefined);
+  assert.equal(qualify(), entry);
+  assert.equal(calls.length, 1);
+  const retry = qualify(true);
+  assert.notEqual(retry, entry);
+  assert.equal(retry.status, 'pending');
+  calls[1][3](null, `Hermes Agent v0.22.5\nInstall directory: ${root}\n`);
+  assert.equal(retry.status, 'ready');
+  const thrown = qualifyInventory(command, home, [], { entries: new Map(), run() { throw new Error('fixture spawn failure'); } });
+  assert.equal(thrown.status, 'refused');
+  const unknown = qualifyInventory(command, home, [], { entries: new Map(), run(_f, _a, _o, cb) { cb(null, 'unrecognized output'); return {}; } });
+  assert.equal(unknown.status, 'unsupported');
+});
 
 test('full-title search is independent of label truncation', () => {
   assert.deepEqual(matches({ ...base, query: 'hidden-tail-needle' }), [rows[0]]);
