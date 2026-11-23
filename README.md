@@ -1,7 +1,7 @@
 # ★ Hermes Session Pins
 
 Keep important Hermes chats easy to find. Uses Hermes's native pins, with no
-model calls, network requests, extra packages, or core patches.
+model calls, extra packages, or core patches.
 
 ## Install
 
@@ -71,6 +71,8 @@ the plugin loaded. Opens before qualification finishes keep the stock inventory
 path and can be slower while both commands run. Other launches also keep the
 CLI inventory path. Both use the same native session inventory. The selector
 keeps the chat background unchanged and shows a static loading hint while waiting.
+A runtime change can trigger another version check. If a check fails, resolve
+its cause and press Ctrl+R to retry; the picker does not bypass that refusal.
 
 Reopening can reuse metadata for up to 30 seconds if the DB, WAL and local
 plugin configuration are unchanged. First open, expiry, DB changes, widget

@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.2
+
+- Keep the chat background unchanged while the in-chat selector loads; use a
+  static loading hint instead of an animated shimmer and viewport backdrop.
+- On qualified local Linux launches, read native session metadata through the
+  TUI's existing Python runtime instead of bootstrapping the full CLI per read.
+  The first picker open starts a bounded public runtime-version check; until it
+  finishes, inventory uses the stock CLI. That check can perform Hermes's normal
+  update check and cache writes, so first-open speed is not guaranteed to improve.
+- Preserve profile binding, native visibility, full-title search and metadata-only
+  Ink output. Stable reopens can reuse a short-lived cache; Ctrl+R reads afresh.
+- Add Left = Pinned and Right = All, retaining Tab, and simplify the README.
+- Enter still copies the resume command for paste and confirmation. This release
+  does not add same-view Enter-to-open or change Hermes core.
+
+Upgrade with `hermes plugins update session-pins`, then refresh the widget with
+`hermes pins install-ui`. If an older widget conflicts, preserve
+`$HERMES_HOME/tui-widgets/session-pins.mjs` elsewhere before running `install-ui`
+again. Use `/widgets-reload`, then reopen `/pins`; no service restart is needed.
+
 ## 0.4.1
 
 - Add `/pin status`: a read-only check of the exact calling chat's pin flag.
